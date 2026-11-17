@@ -297,10 +297,8 @@ function dt_icon(string $name): string
     static $paths = [
         'home'       => '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
         'livestock'  => '<circle cx="5" cy="10" r="2"/><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="19" cy="10" r="2"/><path d="M12 11c-3 0-6 3.5-6 6.5 0 2 1.5 2.5 3 2s2-.7 3-.7 2 .7 3 .7 3-.5 3-2.5c0-3-3-6-6-6z"/>',
-        'farms'      => '<path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/><line x1="16" y1="8" x2="2" y2="22"/><line x1="17.5" y1="15" x2="9" y2="15"/>',
         'purchases'  => '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>',
         'products'   => '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
-        'inventory'  => '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>',
         'people'     => '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
         'users'      => '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/>',
         'accounting' => '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
@@ -399,11 +397,10 @@ $logoUrl    = dt_find_logo(DT_LOGO_FILE);
  * A group with submenus renders as an expandable button; its own page is reached through its submenu links.
  * Links are relative to pages/ (this file). Grouped sections live in their own folder:
  *   Sales      -> pages/sales/       (e.g. /pages/sales/invoices.php)
- *   Inventory  -> pages/inventory/   (e.g. /pages/inventory/livestock.php)
  *   People     -> pages/people/      (e.g. /pages/people/customers.php)
  *   Accounting -> pages/accounting/  (e.g. /pages/accounting/chartofaccounts.php)
  *   Reports    -> pages/reports/     (e.g. /pages/reports/salesreport.php)
- * Single pages (Purchases, Settings, Users, Activities) stay directly in pages/.
+ * Single pages (Purchases, Products, Livestock, Settings, Users, Activities) stay directly in pages/.
  *
  * @var list<array{0:string,1:string,2:string,3:string,4:list<array{0:string,1:string}>}> $navigation
  */
@@ -413,12 +410,9 @@ $navigation = [
         ['Invoices',   'sales/invoices.php'],
         ['Quotations', 'sales/quotations.php'],
     ]],
+    ['livestock',  'Livestock',  'livestock',  'livestock.php',  []],
+    ['products',   'Products',   'products',   'products.php',   []],
     ['purchases',  'Purchases',  'purchases',  'purchases.php',  []],
-    ['inventory',  'Inventory',  'inventory',  'inventory/livestock.php',  [
-        ['Livestock',      'inventory/livestock.php'],
-        ['Farms',          'inventory/farms.php'],
-        ['Other Products', 'inventory/otherproducts.php'],
-    ]],
     ['people',     'People',     'people',     'people/customers.php', [
         ['Customers',    'people/customers.php'],
         ['Suppliers',    'people/suppliers.php'],
@@ -439,8 +433,6 @@ $navigation = [
         ['Sales Report',      'reports/salesreport.php'],
         ['Purchases Report',  'reports/purchasesreport.php'],
         ['Livestock',         'reports/livestockreport.php'],
-        ['Farms',             'reports/farmsreport.php'],
-        ['Other Products',    'reports/otherproductsreport.php'],
         ['Customers',         'reports/customersreport.php'],
         ['Suppliers',         'reports/suppliersreport.php'],
         ['Employees',         'reports/employeesreport.php'],
@@ -449,6 +441,7 @@ $navigation = [
         ['Chart of Accounts', 'reports/chartofaccountsreport.php'],
         ['Receipts',          'reports/receiptsreport.php'],
         ['Payments',          'reports/paymentsreport.php'],
+        ['Cash Report',       'reports/cashreport.php'],
         ['Expenses',          'reports/expensesreport.php'],
         ['Account Transfer',  'reports/accounttransferreport.php'],
         ['Payrolls',          'reports/payrollsreport.php'],
