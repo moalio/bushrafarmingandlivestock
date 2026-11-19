@@ -75,9 +75,8 @@ const DT_LOGO_DIRS      = ['uploads', 'assets', 'images'];     // folders next t
 
 /* Table and column names (fixed values, never user input). Fix a name here if your schema differs. */
 const BF_SCHEMA = [
-    'sales'     => ['table' => 'Sales',     'date' => 'SaleDate',     'total' => 'TotalAmount', 'paid' => 'PaidAmount', 'due' => 'DueDate'],
-    'purchases' => ['table' => 'Purchases', 'date' => 'PurchaseDate', 'total' => 'TotalAmount', 'paid' => 'PaidAmount', 'due' => 'DueDate'],
-    'expenses'  => ['table' => 'Expenses',  'date' => 'ExpenseDate',  'total' => 'Amount'],
+    'sales'    => ['table' => 'Sales',    'date' => 'SaleDate',    'total' => 'TotalAmount', 'paid' => 'PaidAmount', 'due' => 'DueDate'],
+    'expenses' => ['table' => 'Expenses', 'date' => 'ExpenseDate', 'total' => 'Amount'],
 ];
 
 /* ================================================================
@@ -209,10 +208,10 @@ function dt_time_ago(string $datetime): string
 }
 
 /**
- * Total of sales, purchases or expenses from a date (included) to a date (excluded).
+ * Total of sales or expenses from a date (included) to a date (excluded).
  *
  * @param PDO    $pdo  Connection.
- * @param string $kind sales | purchases | expenses (key of BF_SCHEMA).
+ * @param string $kind sales | expenses (key of BF_SCHEMA).
  * @param string $from First day (Y-m-d).
  * @param string $to   Day after the last day (Y-m-d).
  *
@@ -230,10 +229,10 @@ function dt_total_between(PDO $pdo, string $kind, string $from, string $to): flo
 }
 
 /**
- * Open balance of sales (receivables) or purchases (payables).
+ * Open balance of sales (receivables).
  *
  * @param PDO    $pdo  Connection.
- * @param string $kind sales | purchases.
+ * @param string $kind sales (key of BF_SCHEMA).
  *
  * @return array{amount:float,count:int,overdue:float} Open amount, open documents, overdue part.
  */
@@ -297,7 +296,6 @@ function dt_icon(string $name): string
     static $paths = [
         'home'       => '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
         'livestock'  => '<circle cx="5" cy="10" r="2"/><circle cx="9" cy="5" r="2"/><circle cx="15" cy="5" r="2"/><circle cx="19" cy="10" r="2"/><path d="M12 11c-3 0-6 3.5-6 6.5 0 2 1.5 2.5 3 2s2-.7 3-.7 2 .7 3 .7 3-.5 3-2.5c0-3-3-6-6-6z"/>',
-        'purchases'  => '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>',
         'products'   => '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
         'people'     => '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
         'users'      => '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/>',
@@ -308,7 +306,6 @@ function dt_icon(string $name): string
         'expenses'   => '<path d="M21 12V7a2 2 0 0 0-2-2H5a2 2 0 0 1 0-4h14"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>',
         'sales'      => '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
         'receivable' => '<line x1="17" y1="7" x2="7" y2="17"/><polyline points="17 17 7 17 7 7"/>',
-        'payable'    => '<line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/>',
         'menu'       => '<line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>',
         'logout'     => '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
         'arrow'      => '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
@@ -349,7 +346,7 @@ function dt_stat(string $label, float|int|null $now, float|int|null $prev, strin
 }
 
 /**
- * Build one stat card for an open balance (receivables or payables).
+ * Build one stat card for an open balance (receivables).
  *
  * @param string                                          $label Card label.
  * @param array{amount:float,count:int,overdue:float}|null $open  Open balance (null = unavailable).
@@ -393,63 +390,56 @@ $logoutUrl  = '../index.php';
 $logoUrl    = dt_find_logo(DT_LOGO_FILE);
 
 /**
- * Sidebar: key, label, icon, page, submenu links (label, page).
+ * Sidebar (7 items): key, label, icon, page, submenu links (label, page).
  * A group with submenus renders as an expandable button; its own page is reached through its submenu links.
- * Links are relative to pages/ (this file). Grouped sections live in their own folder:
- *   Sales      -> pages/sales/       (e.g. /pages/sales/invoices.php)
- *   People     -> pages/people/      (e.g. /pages/people/customers.php)
- *   Accounting -> pages/accounting/  (e.g. /pages/accounting/chartofaccounts.php)
- *   Reports    -> pages/reports/     (e.g. /pages/reports/salesreport.php)
- * Single pages (Purchases, Products, Livestock, Settings, Users, Activities) stay directly in pages/.
+ * ALL pages live flat in pages/ (no people/, accounting/ or reports/ sub-folders),
+ * so every link is just a file name relative to this file, e.g. suppliers.php.
+ * The Sales menu (invoices.php, quotations.php) was removed on request.
  *
  * @var list<array{0:string,1:string,2:string,3:string,4:list<array{0:string,1:string}>}> $navigation
  */
 $navigation = [
     ['dashboard',  'Dashboard',  'home',       'dashboard.php',  []],
-    ['sales',      'Sales',      'sales',      'sales/invoices.php', [
-        ['Invoices',   'sales/invoices.php'],
-        ['Quotations', 'sales/quotations.php'],
-    ]],
     ['livestock',  'Livestock',  'livestock',  'livestock.php',  []],
     ['products',   'Products',   'products',   'products.php',   []],
-    ['purchases',  'Purchases',  'purchases',  'purchases.php',  []],
-    ['people',     'People',     'people',     'people/customers.php', [
-        ['Customers',    'people/customers.php'],
-        ['Suppliers',    'people/suppliers.php'],
-        ['Shareholders', 'people/shareholders.php'],
-        ['Employees',    'people/employees.php'],
+    ['people',     'People',     'people',     'customers.php', [
+        ['Customers',    'customers.php'],
+        ['Suppliers',    'suppliers.php'],
+        ['Shareholders', 'shareholders.php'],
+        ['Employees',    'employees.php'],
     ]],
-    ['accounting', 'Accounting', 'accounting', 'accounting/chartofaccounts.php', [
-        ['Chart of Accounts', 'accounting/chartofaccounts.php'],
-        ['Receipts',          'accounting/receipts.php'],
-        ['Payments',          'accounting/payments.php'],
-        ['Expenses',          'accounting/expenses.php'],
-        ['Account Transfer',  'accounting/accounttransfer.php'],
-        ["Owner's Equity",    'accounting/equity.php'],
-        ['Payrolls',          'accounting/payrolls.php'],
-        ['Assets',            'accounting/assets.php'],
+    ['accounting', 'Accounting', 'accounting', 'chartofaccounts.php', [
+        ['Chart of Accounts', 'chartofaccounts.php'],
+        ['Receipts',          'receipts.php'],
+        ['Customer Deposit',  'customerdeposit.php'],
+        ['Payments',          'payments.php'],
+        ['Expenses',          'expenses.php'],
+        ['Account Transfer',  'accounttransfer.php'],
+        ["Owner's Equity",    'equity.php'],
+        ['Payrolls',          'payrolls.php'],
+        ['Assets',            'assets.php'],
     ]],
-    ['reports',    'Reports',    'reports',    'reports/salesreport.php', [
-        ['Sales Report',      'reports/salesreport.php'],
-        ['Purchases Report',  'reports/purchasesreport.php'],
-        ['Livestock',         'reports/livestockreport.php'],
-        ['Customers',         'reports/customersreport.php'],
-        ['Suppliers',         'reports/suppliersreport.php'],
-        ['Employees',         'reports/employeesreport.php'],
-        ['Shareholders',      'reports/shareholdersreport.php'],
-        ['Users',             'reports/usersreport.php'],
-        ['Chart of Accounts', 'reports/chartofaccountsreport.php'],
-        ['Receipts',          'reports/receiptsreport.php'],
-        ['Payments',          'reports/paymentsreport.php'],
-        ['Cash Report',       'reports/cashreport.php'],
-        ['Expenses',          'reports/expensesreport.php'],
-        ['Account Transfer',  'reports/accounttransferreport.php'],
-        ['Payrolls',          'reports/payrollsreport.php'],
-        ['Assets',            'reports/assetsreport.php'],
-        ['Income Statement',  'reports/incomestatement.php'],
-        ['Equity Statement',  'reports/equitystatement.php'],
-        ['Balance Sheet',     'reports/balancesheet.php'],
-        ['Cash Flow',         'reports/cashflow.php'],
+    ['reports',    'Reports',    'reports',    'salesreport.php', [
+        ['Sales Report',      'salesreport.php'],
+        ['Livestock',         'livestockreport.php'],
+        ['Customers',         'customersreport.php'],
+        ['Suppliers',         'suppliersreport.php'],
+        ['Employees',         'employeesreport.php'],
+        ['Shareholders',      'shareholdersreport.php'],
+        ['Users',             'usersreport.php'],
+        ['Chart of Accounts', 'chartofaccountsreport.php'],
+        ['Receipts',          'receiptsreport.php'],
+        ['Deposit Report',    'depositreport.php'],
+        ['Payments',          'paymentsreport.php'],
+        ['Cash Report',       'cashreport.php'],
+        ['Expenses',          'expensesreport.php'],
+        ['Account Transfer',  'accounttransferreport.php'],
+        ['Payrolls',          'payrollsreport.php'],
+        ['Assets',            'assetsreport.php'],
+        ['Income Statement',  'incomestatement.php'],
+        ['Equity Statement',  'equitystatement.php'],
+        ['Balance Sheet',     'balancesheet.php'],
+        ['Cash Flow',         'cashflow.php'],
     ]],
     ['settings',   'Settings',   'settings',   'settings.php',   []],
 ];
@@ -475,9 +465,8 @@ $salesPrev = dt_safe(static fn () => dt_total_between(dt_pdo(), 'sales', $prevMo
 $expNow    = dt_safe(static fn () => dt_total_between(dt_pdo(), 'expenses', $monthStart, $nextMonth));
 $expPrev   = dt_safe(static fn () => dt_total_between(dt_pdo(), 'expenses', $prevMonth, $monthStart));
 
-// Open receivables (sales) and open payables (purchases).
+// Open receivables (sales).
 $receivables = dt_safe(static fn () => dt_open_balance(dt_pdo(), 'sales'));
-$payables    = dt_safe(static fn () => dt_open_balance(dt_pdo(), 'purchases'));
 
 // Activity log (latest rows; ordered by the primary key so it stays fast as the log grows).
 $activities = dt_safe(static fn () => dt_q(
@@ -493,8 +482,7 @@ $activities = dt_safe(static fn () => dt_q(
 $stats = [
     dt_stat('Sales This Month', $salesNow, $salesPrev, 'Compared last month', 'sales', 'accent'),
     dt_open_stat('Open Receivables', $receivables, 'receivable', 'primary'),
-    dt_open_stat('Open Payables', $payables, 'payable', 'accent'),
-    dt_stat('Expenses This Month', $expNow, $expPrev, 'Compared last month', 'expenses', 'primary'),
+    dt_stat('Expenses This Month', $expNow, $expPrev, 'Compared last month', 'expenses', 'accent'),
 ];
 
 // Sales vs expenses, last months (oldest first).
@@ -513,12 +501,6 @@ for ($i = DT_TREND_MONTHS - 1; $i >= 0; $i--) {
     $spent    = (float)($spent ?? 0);
     $trendMax = max($trendMax, $sold, $spent);
     $trend[]  = ['label' => date('M Y', strtotime($from)), 'sales' => $sold, 'exp' => $spent];
-}
-
-// Receivables vs payables: open amount and overdue part.
-$balances = [];
-foreach (['Receivables' => $receivables, 'Payables' => $payables] as $name => $open) {
-    $balances[] = ['name' => $name, 'open' => $open];
 }
 
 $nonce = dt_e(dt_nonce());
@@ -909,28 +891,26 @@ $nonce = dt_e(dt_nonce());
 
             <section class="card" aria-labelledby="balanceTitle">
                 <div class="card-body">
-                    <div class="card-head"><h2 class="header-title" id="balanceTitle">Receivables and Payables</h2></div>
+                    <div class="card-head"><h2 class="header-title" id="balanceTitle">Receivables</h2></div>
                     <div class="legend">
                         <span><i class="l-exp"></i>Overdue part of the open amount</span>
                     </div>
-                    <?php foreach ($balances as $b): ?>
-                        <?php if ($b['open'] === null): ?>
-                            <div class="city-item">
-                                <div class="city-row">
-                                    <span class="city-code"><?= dt_e($b['name']) ?></span>
-                                    <span class="city-times">Unavailable</span>
-                                </div>
+                    <?php if ($receivables === null): ?>
+                        <div class="city-item">
+                            <div class="city-row">
+                                <span class="city-code">Receivables</span>
+                                <span class="city-times">Unavailable</span>
                             </div>
-                        <?php else: ?>
-                            <div class="city-item">
-                                <div class="city-row">
-                                    <span class="city-code"><?= dt_e($b['name']) ?></span>
-                                    <span class="city-times"><?= dt_e(dt_money($b['open']['overdue'])) ?> overdue of <?= dt_e(dt_money($b['open']['amount'])) ?></span>
-                                </div>
-                                <progress class="bar exp" max="<?= dt_e((string)max($b['open']['amount'], 1.0)) ?>" value="<?= dt_e((string)$b['open']['overdue']) ?>" aria-label="<?= dt_e($b['name']) ?> overdue share"></progress>
+                        </div>
+                    <?php else: ?>
+                        <div class="city-item">
+                            <div class="city-row">
+                                <span class="city-code">Receivables</span>
+                                <span class="city-times"><?= dt_e(dt_money($receivables['overdue'])) ?> overdue of <?= dt_e(dt_money($receivables['amount'])) ?></span>
                             </div>
-                        <?php endif; ?>
-                    <?php endforeach; ?>
+                            <progress class="bar exp" max="<?= dt_e((string)max($receivables['amount'], 1.0)) ?>" value="<?= dt_e((string)$receivables['overdue']) ?>" aria-label="Receivables overdue share"></progress>
+                        </div>
+                    <?php endif; ?>
                 </div>
             </section>
 

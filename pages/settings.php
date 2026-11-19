@@ -173,57 +173,57 @@ $logoUrl    = dt_find_logo(DT_LOGO_FILE);
 
 /**
  * Sidebar: key, label, icon, page, submenu links (label, page). Same menu as pages/dashboard.php.
- * Links are relative to pages/ (this file).
- * Single pages (Purchases, Products, Livestock, Settings, Users, Activities) stay directly in pages/.
+ * ALL pages live flat in pages/ (no sales/, people/, accounting/ or reports/ sub-folders),
+ * so every link is just a file name relative to this file, e.g. invoices.php, suppliers.php.
  *
  * @var list<array{0:string,1:string,2:string,3:string,4:list<array{0:string,1:string}>}> $navigation
  */
 $navigation = [
     ['dashboard',  'Dashboard',  'home',       'dashboard.php',  []],
-    ['sales',      'Sales',      'sales',      'sales/invoices.php', [
-        ['Invoices',   'sales/invoices.php'],
-        ['Quotations', 'sales/quotations.php'],
+    ['sales',      'Sales',      'sales',      'invoices.php', [
+        ['Invoices',   'invoices.php'],
+        ['Quotations', 'quotations.php'],
     ]],
     ['livestock',  'Livestock',  'livestock',  'livestock.php',  []],
     ['products',   'Products',   'products',   'products.php',   []],
     ['purchases',  'Purchases',  'purchases',  'purchases.php',  []],
-    ['people',     'People',     'people',     'people/customers.php', [
-        ['Customers',    'people/customers.php'],
-        ['Suppliers',    'people/suppliers.php'],
-        ['Shareholders', 'people/shareholders.php'],
-        ['Employees',    'people/employees.php'],
+    ['people',     'People',     'people',     'customers.php', [
+        ['Customers',    'customers.php'],
+        ['Suppliers',    'suppliers.php'],
+        ['Shareholders', 'shareholders.php'],
+        ['Employees',    'employees.php'],
     ]],
-    ['accounting', 'Accounting', 'accounting', 'accounting/chartofaccounts.php', [
-        ['Chart of Accounts', 'accounting/chartofaccounts.php'],
-        ['Receipts',          'accounting/receipts.php'],
-        ['Payments',          'accounting/payments.php'],
-        ['Expenses',          'accounting/expenses.php'],
-        ['Account Transfer',  'accounting/accounttransfer.php'],
-        ["Owner's Equity",    'accounting/equity.php'],
-        ['Payrolls',          'accounting/payrolls.php'],
-        ['Assets',            'accounting/assets.php'],
+    ['accounting', 'Accounting', 'accounting', 'chartofaccounts.php', [
+        ['Chart of Accounts', 'chartofaccounts.php'],
+        ['Receipts',          'receipts.php'],
+        ['Payments',          'payments.php'],
+        ['Expenses',          'expenses.php'],
+        ['Account Transfer',  'accounttransfer.php'],
+        ["Owner's Equity",    'equity.php'],
+        ['Payrolls',          'payrolls.php'],
+        ['Assets',            'assets.php'],
     ]],
-    ['reports',    'Reports',    'reports',    'reports/salesreport.php', [
-        ['Sales Report',      'reports/salesreport.php'],
-        ['Purchases Report',  'reports/purchasesreport.php'],
-        ['Livestock',         'reports/livestockreport.php'],
-        ['Customers',         'reports/customersreport.php'],
-        ['Suppliers',         'reports/suppliersreport.php'],
-        ['Employees',         'reports/employeesreport.php'],
-        ['Shareholders',      'reports/shareholdersreport.php'],
-        ['Users',             'reports/usersreport.php'],
-        ['Chart of Accounts', 'reports/chartofaccountsreport.php'],
-        ['Receipts',          'reports/receiptsreport.php'],
-        ['Payments',          'reports/paymentsreport.php'],
-        ['Cash Report',       'reports/cashreport.php'],
-        ['Expenses',          'reports/expensesreport.php'],
-        ['Account Transfer',  'reports/accounttransferreport.php'],
-        ['Payrolls',          'reports/payrollsreport.php'],
-        ['Assets',            'reports/assetsreport.php'],
-        ['Income Statement',  'reports/incomestatement.php'],
-        ['Equity Statement',  'reports/equitystatement.php'],
-        ['Balance Sheet',     'reports/balancesheet.php'],
-        ['Cash Flow',         'reports/cashflow.php'],
+    ['reports',    'Reports',    'reports',    'salesreport.php', [
+        ['Sales Report',      'salesreport.php'],
+        ['Purchases Report',  'purchasesreport.php'],
+        ['Livestock',         'livestockreport.php'],
+        ['Customers',         'customersreport.php'],
+        ['Suppliers',         'suppliersreport.php'],
+        ['Employees',         'employeesreport.php'],
+        ['Shareholders',      'shareholdersreport.php'],
+        ['Users',             'usersreport.php'],
+        ['Chart of Accounts', 'chartofaccountsreport.php'],
+        ['Receipts',          'receiptsreport.php'],
+        ['Payments',          'paymentsreport.php'],
+        ['Cash Report',       'cashreport.php'],
+        ['Expenses',          'expensesreport.php'],
+        ['Account Transfer',  'accounttransferreport.php'],
+        ['Payrolls',          'payrollsreport.php'],
+        ['Assets',            'assetsreport.php'],
+        ['Income Statement',  'incomestatement.php'],
+        ['Equity Statement',  'equitystatement.php'],
+        ['Balance Sheet',     'balancesheet.php'],
+        ['Cash Flow',         'cashflow.php'],
     ]],
     ['settings',   'Settings',   'settings',   'settings.php',   []],
 ];
