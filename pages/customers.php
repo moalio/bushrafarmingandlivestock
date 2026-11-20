@@ -1165,13 +1165,8 @@ if (session_status() === PHP_SESSION_ACTIVE) {
  */
 $navigation = [
     ['dashboard',  'Dashboard',  'home',       'dashboard.php',  []],
-    ['sales',      'Sales',      'sales',      'invoices.php', [
-        ['Invoices',   'invoices.php'],
-        ['Quotations', 'quotations.php'],
-    ]],
     ['livestock',  'Livestock',  'livestock',  'livestock.php',  []],
     ['products',   'Products',   'products',   'products.php',   []],
-    ['purchases',  'Purchases',  'purchases',  'purchases.php',  []],
     ['people',     'People',     'people',     'customers.php', [
         ['Customers',    'customers.php'],
         ['Suppliers',    'suppliers.php'],
@@ -1181,6 +1176,7 @@ $navigation = [
     ['accounting', 'Accounting', 'accounting', 'chartofaccounts.php', [
         ['Chart of Accounts', 'chartofaccounts.php'],
         ['Receipts',          'receipts.php'],
+        ['Customer Deposit',  'customerdeposit.php'],
         ['Payments',          'payments.php'],
         ['Expenses',          'expenses.php'],
         ['Account Transfer',  'accounttransfer.php'],
@@ -1190,7 +1186,6 @@ $navigation = [
     ]],
     ['reports',    'Reports',    'reports',    'salesreport.php', [
         ['Sales Report',      'salesreport.php'],
-        ['Purchases Report',  'purchasesreport.php'],
         ['Livestock',         'livestockreport.php'],
         ['Customers',         'customersreport.php'],
         ['Suppliers',         'suppliersreport.php'],
@@ -1199,6 +1194,7 @@ $navigation = [
         ['Users',             'usersreport.php'],
         ['Chart of Accounts', 'chartofaccountsreport.php'],
         ['Receipts',          'receiptsreport.php'],
+        ['Deposit Report',    'depositreport.php'],
         ['Payments',          'paymentsreport.php'],
         ['Cash Report',       'cashreport.php'],
         ['Expenses',          'expensesreport.php'],
