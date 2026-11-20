@@ -16,23 +16,23 @@ declare(strict_types=1);
  *
  * Price names (the ONLY three used in the database, the backend and the frontend):
  *   Purchase Cost ($) = purchasecost  total paid for all animals of a purchase (typed in the Purchase form)
- *   Cost Each ($)     = costeach      Purchase Cost / Quantity, rounded half up to 2 decimals (the server recomputes it)
- *   Selling Price ($) = sellingprice  price you sell one animal for (typed)
+ *   Cost Each ($)     = costeach      Purchase Cost / Quantity, rounded half up to 2 decimals. Calculated ONLY by the backend (dt_cost_each() and action purchasecalc); the browser only displays it
+ *   Price Each ($) = priceeach  price you sell one animal for (typed)
  *
- * Columns: livestockid, name, type, currentstock, costeach, sellingprice, stage.
+ * Columns: livestockid, name, type, currentstock, costeach, priceeach, stage.
  *   costeach     = cost of one animal (0.00 to 9,999,999.99); set by Add / Edit and by the latest purchase
- *   sellingprice = selling price of one animal (0.00 to 9,999,999.99); set by Add / Edit and by the purchase form
+ *   priceeach = Price Each of one animal (0.00 to 9,999,999.99); set by Add / Edit and by the purchase form
  *
  * Required schema (already applied; see the SQL of PART 0, the ALTER below is only a reminder):
  *   ALTER TABLE `livestock`
  *     ADD COLUMN `costeach`  DECIMAL(9,2) NOT NULL DEFAULT 0.00 AFTER `currentstock`,
- *     ADD COLUMN `sellingprice`DECIMAL(9,2) NOT NULL DEFAULT 0.00 AFTER `costeach`;
+ *     ADD COLUMN `priceeach`DECIMAL(9,2) NOT NULL DEFAULT 0.00 AFTER `costeach`;
  * Required tables for the sale and quotation modals: quotations, quotationitems, receipts
  * (see bushrafarmingandlivestock_quotations_receipts.sql).
  * Required tables for the invoice, return and refund modals: salereturns, salereturnitems, salerefunds
  * (see the SQL that came with this page). All table and column names are lowercase.
  *
- * One page, fifteen AJAX actions (POST, JSON): list, save, delete, purchaselookups, purchasesave,
+ * One page, many AJAX actions (POST, JSON): list, save, delete, purchaselookups, purchasecalc, purchasesave,
  * salelookups, salesave, quotationlookups, quotationsave, saleslist, saleget, returnsave, refundlookups,
  * refundsave, invoicedelete.
  * Same shell as pages/dashboard.php, same architecture as the Dalsan customers page.
@@ -42,7 +42,7 @@ declare(strict_types=1);
  * PURCHASE LIVESTOCK (livestock only, one line per purchase):
  *   Tables used (single tenant, all names lowercase, same as pages/purchases.php):
  *     purchases     (purchaseid, supplierid, purchasedate, reference, totalamount, paidamount, paidfromaccountid, note)
- *     purchaseitems (purchaseitemid, purchaseid, itemtype, livestockid, productid, quantity, costeach, sellingprice, purchasecost, stockadded)
+ *     purchaseitems (purchaseitemid, purchaseid, itemtype, livestockid, productid, quantity, costeach, priceeach, purchasecost, stockadded)
  *     suppliers     (supplierid, name)
  *     accounts      (accountid, parentaccountid, code, accountname, accounttype, status)
  *     payments      (optional, see BF_PAYMENTS): a missing table or column is logged and skipped.
@@ -53,14 +53,14 @@ declare(strict_types=1);
  *
  * ADD NEW SALE (livestock only, one line per sale, written as an invoice):
  *     invoices     (invoiceid, customerid, invoicedate, reference, totalamount, paidamount, receivedinaccountid, note)
- *     invoiceitems (invoiceitemid, invoiceid, itemtype, livestockid, productid, quantity, sellingprice, costeach, linetotal)
+ *     invoiceitems (invoiceitemid, invoiceid, itemtype, livestockid, productid, quantity, priceeach, costeach, linetotal)
  *     customers    (customerid, name, primarycontact, address)
  *     receipts     (optional, see BF_RECEIPTS): a missing table or column is logged and skipped.
  *   Database triggers keep invoices (receivedinaccountid when paidamount > 0) and invoiceitems (itemtype) valid.
  *
  * INVOICE, SALES LIST, RETURN, REFUND, DELETE INVOICE (all modals of this page):
  *     salereturns     (returnid, invoiceid, customerid, returndate, totalamount, note)
- *     salereturnitems (returnitemid, returnid, invoiceitemid, livestockid, quantity, sellingprice, linetotal)
+ *     salereturnitems (returnitemid, returnid, invoiceitemid, livestockid, quantity, priceeach, linetotal)
  *     salerefunds     (refundid, invoiceid, returnid, customerid, accountid, amount, refunddate, note)
  *   Net total   = invoice total minus the value of its returns.
  *   Balance due = net total minus (paid minus refunded), never below 0 (an overpaid invoice shows a credit).
@@ -71,7 +71,7 @@ declare(strict_types=1);
  *
  * MAKE QUOTATION (livestock only, 1 to 200 lines, no stock change):
  *     quotations     (quotationid, customerid, quotationdate, validuntil, reference, totalamount, status, note)
- *     quotationitems (quotationitemid, quotationid, livestockid, quantity, sellingprice, linetotal)
+ *     quotationitems (quotationitemid, quotationid, livestockid, quantity, priceeach, linetotal)
  *
  * NO LOGIN for now: this page does not check a session or a permission.
  * When login returns, call the auth helpers of ../db.php right after the
@@ -95,7 +95,7 @@ const DT_MAX_NAME   = 150;
 const DT_MAX_TYPE   = 100;
 const DT_MAX_STOCK  = 9999999;
 const DT_MAX_STAGE  = 50;
-const DT_MAX_MONEY  = '9,999,999.99'; // display text of the largest cost each / selling price (DECIMAL(9,2))
+const DT_MAX_MONEY  = '9,999,999.99'; // display text of the largest cost each / Price Each (DECIMAL(9,2))
 
 const DT_MAX_REFERENCE = 50;
 const DT_MAX_NOTE      = 255;
@@ -107,7 +107,7 @@ const DT_PRICE_INT_DIGITS = 7;  // 9,999,999.99
 const DT_PRICE_SCALE      = 2;
 const DT_TOTAL_INT_DIGITS = 9;  // 999,999,999.99 (decimal 11,2)
 const DT_MAX_TOTAL_MINOR  = 99999999999;
-const DT_MAX_PRICE_MINOR  = 999999999; // 9,999,999.99 in minor units (largest cost each / selling price)
+const DT_MAX_PRICE_MINOR  = 999999999; // 9,999,999.99 in minor units (largest cost each / Price Each)
 
 /**
  * Cost Each = Purchase Cost / Quantity, rounded half up to 2 decimals. Integer minor units only, no float.
@@ -140,7 +140,7 @@ const BF_LIVESTOCK = [
     'type'   => 'type',
     'stock'  => 'currentstock',
     'cost'   => 'costeach',
-    'price'  => 'sellingprice',
+    'price'  => 'priceeach',
     'stage'   => 'stage',
 ];
 
@@ -185,7 +185,7 @@ const BF_PURCHASEITEMS = [
     'productid'    => 'productid',
     'quantity'     => 'quantity',
     'costeach'     => 'costeach',
-    'sellingprice' => 'sellingprice',
+    'priceeach' => 'priceeach',
     'purchasecost' => 'purchasecost',
     'stockadded'   => 'stockadded',
 ];
@@ -226,7 +226,7 @@ const BF_INVOICEITEMS = [
     'livestockid'  => 'livestockid',
     'productid'    => 'productid',
     'quantity'     => 'quantity',
-    'sellingprice' => 'sellingprice',
+    'priceeach' => 'priceeach',
     'costeach'     => 'costeach',
     'linetotal'    => 'linetotal',
 ];
@@ -264,7 +264,7 @@ const BF_SALERETURNITEMS = [
     'invoiceitemid' => 'invoiceitemid',
     'livestockid'   => 'livestockid',
     'quantity'      => 'quantity',
-    'sellingprice'  => 'sellingprice',
+    'priceeach'  => 'priceeach',
     'linetotal'     => 'linetotal',
 ];
 
@@ -313,7 +313,7 @@ const BF_QUOTATIONITEMS = [
     'quotationid'  => 'quotationid',
     'livestockid'  => 'livestockid',
     'quantity'     => 'quantity',
-    'sellingprice' => 'sellingprice',
+    'priceeach' => 'priceeach',
     'linetotal'    => 'linetotal',
 ];
 
@@ -706,7 +706,7 @@ function dt_icon(string $name): string
  * ============================================================== */
 
 /**
- * Validate a money field (cost each or selling price): digits with up to 2 decimals, 0 to 9,999,999.99.
+ * Validate a money field (cost each or Price Each): digits with up to 2 decimals, 0 to 9,999,999.99.
  *
  * @param string $raw   Posted text.
  * @param string $label Field label for the message.
@@ -723,7 +723,7 @@ function dt_clean_money(string $raw, string $label, string $field): string
         throw new DtFail($label . ' must be 0 or more, with up to 2 decimals.', false, $field);
     }
 
-    return number_format((float)$raw, 2, '.', '');
+    return dt_minor_to_decimal(dt_decimal_to_minor($raw, 2), 2);
 }
 
 /**
@@ -757,7 +757,7 @@ function dt_read_livestock_input(): array
         throw new DtFail('Current stock must be a whole number from 0 to ' . number_format(DT_MAX_STOCK) . '.', false, 'currentstock');
     }
     $cost  = dt_clean_money((string)($_POST['costeach'] ?? ''), 'Cost each', 'costeach');
-    $price = dt_clean_money((string)($_POST['sellingprice'] ?? ''), 'Selling price', 'sellingprice');
+    $price = dt_clean_money((string)($_POST['priceeach'] ?? ''), 'Price Each', 'priceeach');
     if ($stage === '') {
         throw new DtFail('Stage is required.', false, 'stage');
     }
@@ -793,7 +793,7 @@ function dt_read_livestock_input_pre(): array
         throw new DtFail('Current stock must be a whole number from 0 to ' . number_format(DT_MAX_STOCK) . '.', false, 'currentstock');
     }
     $cost  = '0.00'; // the purchase sets Cost Each
-    $price = '0.00'; // the purchase sets Selling Price
+    $price = '0.00'; // the purchase sets Price Each
     if ($stage === '') {
         throw new DtFail('Stage is required.', false, 'stage');
     }
@@ -829,7 +829,7 @@ function dt_read_livestock_input_oldstatus(): array
         throw new DtFail('Current stock must be a whole number from 0 to ' . number_format(DT_MAX_STOCK) . '.', false, 'currentstock');
     }
     $cost  = '0.00'; // the purchase sets Cost Each
-    $price = '0.00'; // the purchase sets Selling Price
+    $price = '0.00'; // the purchase sets Price Each
     if ($status === '') {
         throw new DtFail('Stage is required.', false, 'status');
     }
@@ -842,13 +842,13 @@ function dt_read_livestock_input_oldstatus(): array
 
 /**
  * Load and lock (FOR UPDATE) a livestock row. Call inside a transaction.
- * The row also carries costeach and sellingprice (decimal text) for the sale; save, delete and purchasesave ignore them.
+ * The row also carries costeach and priceeach (decimal text) for the sale; save, delete and purchasesave ignore them.
  *
  * @param PDO    $pdo   Connection.
  * @param int    $id    Livestock id.
  * @param string $field Field key returned to the browser when the row is not found (empty for none).
  *
- * @return array<string,mixed> Row (id, name, stock, costeach, sellingprice).
+ * @return array<string,mixed> Row (id, name, stock, costeach, priceeach).
  *
  * @throws DtFail When not found.
  */
@@ -857,7 +857,7 @@ function dt_lock_livestock(PDO $pdo, int $id, string $field = ''): array
     $s   = BF_LIVESTOCK;
     $row = dt_q(
         $pdo,
-        "SELECT `{$s['id']}` AS id, `{$s['name']}` AS name, `{$s['stock']}` AS stock, `{$s['cost']}` AS costeach, `{$s['price']}` AS sellingprice
+        "SELECT `{$s['id']}` AS id, `{$s['name']}` AS name, `{$s['stock']}` AS stock, `{$s['cost']}` AS costeach, `{$s['price']}` AS priceeach
            FROM `{$s['table']}` WHERE `{$s['id']}` = :id FOR UPDATE",
         ['id' => $id]
     )->fetch();
@@ -1419,7 +1419,7 @@ function dt_parse_date(string $raw, string $message, string $field): string
  * Read and validate the posted purchase fields (used by purchasesave, before the transaction).
  * Totals are never trusted from the browser: the line total and the purchase total are computed here in minor units.
  *
- * @return array{supplierid:int,nosupplier:bool,date:string,reference:?string,note:?string,livestockid:int,qty:int,purchasecost:int,costeach:int,sellingprice:int,paid:int,accountid:int} Clean fields.
+ * @return array{supplierid:int,nosupplier:bool,date:string,reference:?string,note:?string,livestockid:int,qty:int,purchasecost:int,costeach:int,priceeach:int,paid:int,accountid:int} Clean fields.
  *
  * @throws DtFail On invalid input.
  */
@@ -1434,7 +1434,7 @@ function dt_read_purchase_input(): array
     $livestockId = max(0, (int)($_POST['livestockid'] ?? 0));
     $rawQty      = trim((string)($_POST['quantity'] ?? ''));
     $rawCost     = trim((string)($_POST['purchasecost'] ?? ''));
-    $rawSelling  = trim((string)($_POST['sellingprice'] ?? ''));
+    $rawPriceEach  = trim((string)($_POST['priceeach'] ?? ''));
     $rawPaid     = trim((string)($_POST['paidamount'] ?? ''));
     $accountId   = max(0, (int)($_POST['paidfromaccountid'] ?? 0));
 
@@ -1462,7 +1462,7 @@ function dt_read_purchase_input(): array
     if ($each > DT_MAX_PRICE_MINOR) {
         throw new DtFail('Cost each is too large (maximum ' . DT_MAX_MONEY . '). Check the purchase cost and the quantity.', false, 'purchasecost');
     }
-    $selling = dt_parse_decimal($rawSelling, DT_PRICE_INT_DIGITS, DT_PRICE_SCALE, false, 'Selling price must be 0 or more, with up to 2 decimals.', 'sellingprice');
+    $priceEach = dt_parse_decimal($rawPriceEach, DT_PRICE_INT_DIGITS, DT_PRICE_SCALE, false, 'Price Each must be 0 or more, with up to 2 decimals.', 'priceeach');
 
     $paid = dt_parse_decimal(
         $rawPaid === '' ? '0' : $rawPaid,
@@ -1493,7 +1493,7 @@ function dt_read_purchase_input(): array
         'purchasecost' => $cost,
         'total'        => $cost, // header purchases.totalamount = Purchase Cost
         'costeach'     => $each,
-        'sellingprice' => $selling,
+        'priceeach' => $priceEach,
         'paid'         => $paid,
         'accountid'    => $paid > 0 ? $accountId : 0,
     ];
@@ -2281,7 +2281,7 @@ function dt_read_sale_input(): array
     $lines = [];
     $total = 0;
     foreach (array_values($decoded) as $k => $raw) {
-        $line    = dt_read_quotation_line($raw, $k + 1); // same rules and field keys: lines:N:livestock|quantity|sellingprice
+        $line    = dt_read_quotation_line($raw, $k + 1); // same rules and field keys: lines:N:livestock|quantity|priceeach
         $total  += $line['total'];
         $lines[] = $line;
         if ($total > DT_MAX_TOTAL_MINOR) {
@@ -2345,7 +2345,7 @@ function dt_read_sale_input_prev(): array
     $lines = [];
     $total = 0;
     foreach (array_values($decoded) as $k => $raw) {
-        $line    = dt_read_quotation_line($raw, $k + 1); // same rules and field keys: lines:N:livestock|quantity|sellingprice
+        $line    = dt_read_quotation_line($raw, $k + 1); // same rules and field keys: lines:N:livestock|quantity|priceeach
         $total  += $line['total'];
         $lines[] = $line;
         if ($total > DT_MAX_TOTAL_MINOR) {
@@ -2400,7 +2400,7 @@ function dt_read_sale_input_old(): array
         throw new DtFail('Quantity must be a whole number greater than 0.', false, 'quantity');
     }
     $qty   = (int)$rawQty;
-    $price = dt_parse_decimal($rawPrice, DT_PRICE_INT_DIGITS, DT_PRICE_SCALE, false, 'Selling price must be 0 or more, with up to 2 decimals.', 'unitprice');
+    $price = dt_parse_decimal($rawPrice, DT_PRICE_INT_DIGITS, DT_PRICE_SCALE, false, 'Price Each must be 0 or more, with up to 2 decimals.', 'unitprice');
 
     /* qty <= 999,999 and price <= 999,999,999 minor units: the product cannot overflow a 64-bit integer. */
     $total = $qty * $price;
@@ -2621,12 +2621,12 @@ function dt_read_quotation_line(mixed $l, int $n): array
     }
     $qty   = (int)$rawQty;
     $price = dt_parse_decimal(
-        trim((string)($l['sellingprice'] ?? '')),
+        trim((string)($l['priceeach'] ?? '')),
         DT_PRICE_INT_DIGITS,
         DT_PRICE_SCALE,
         false,
-        'Line ' . $n . ': selling price must be 0 or more, with up to 2 decimals.',
-        'lines:' . $n . ':sellingprice'
+        'Line ' . $n . ': Price Each must be 0 or more, with up to 2 decimals.',
+        'lines:' . $n . ':priceeach'
     );
     $total = $qty * $price;
     if ($total > DT_MAX_TOTAL_MINOR) {
@@ -2901,7 +2901,7 @@ function dt_lookup_livestock(PDO $pdo, bool $withCost): array
     foreach (dt_q(
         $pdo,
         "SELECT `{$l['id']}` AS livestockid, `{$l['name']}` AS name, `{$l['type']}` AS type, `{$l['stock']}` AS currentstock,
-                `{$l['cost']}` AS costeach, `{$l['price']}` AS sellingprice
+                `{$l['cost']}` AS costeach, `{$l['price']}` AS priceeach
            FROM `{$l['table']}` ORDER BY `{$l['name']}` ASC"
     )->fetchAll() as $row) {
         $item = [
@@ -2909,7 +2909,7 @@ function dt_lookup_livestock(PDO $pdo, bool $withCost): array
             'name'         => (string)$row['name'],
             'type'         => (string)$row['type'],
             'currentstock' => (int)$row['currentstock'],
-            'sellingprice' => (string)$row['sellingprice'],
+            'priceeach' => (string)$row['priceeach'],
         ];
         if ($withCost) {
             $item['costeach'] = (string)$row['costeach'];
@@ -3169,7 +3169,33 @@ function dt_act_list(PDO $pdo): array
     $rows = dt_q(
         $pdo,
         "SELECT `{$s['id']}` AS livestockid, `{$s['name']}` AS name, `{$s['type']}` AS type, `{$s['stock']}` AS currentstock,
-                `{$s['cost']}` AS costeach, `{$s['price']}` AS sellingprice, `{$s['stage']}` AS stage
+                `{$s['cost']}` AS costeach, `{$s['price']}` AS priceeach, `{$s['stage']}` AS stage
+           FROM `{$s['table']}` ORDER BY `{$s['name']}` ASC"
+    )->fetchAll();
+
+    $out = [];
+    foreach ($rows as $r) {
+        $out[] = [
+            'livestockid'  => (int)$r['livestockid'],
+            'name'         => (string)($r['name'] ?? ''),
+            'type'         => (string)($r['type'] ?? ''),
+            'currentstock' => (int)($r['currentstock'] ?? 0),
+            'costeach'     => dt_signed_decimal(dt_sum_to_minor((string)($r['costeach'] ?? '0'))),
+            'priceeach'    => dt_signed_decimal(dt_sum_to_minor((string)($r['priceeach'] ?? '0'))),
+            'stage'        => (string)($r['stage'] ?? ''),
+        ];
+    }
+
+    return ['success' => true, 'data' => $out];
+}
+
+function dt_act_list_old1(PDO $pdo): array
+{
+    $s    = BF_LIVESTOCK;
+    $rows = dt_q(
+        $pdo,
+        "SELECT `{$s['id']}` AS livestockid, `{$s['name']}` AS name, `{$s['type']}` AS type, `{$s['stock']}` AS currentstock,
+                `{$s['cost']}` AS costeach, `{$s['price']}` AS priceeach, `{$s['stage']}` AS stage
            FROM `{$s['table']}` ORDER BY `{$s['name']}` ASC"
     )->fetchAll();
 
@@ -3181,7 +3207,7 @@ function dt_act_list(PDO $pdo): array
             'type'         => (string)($r['type'] ?? ''),
             'currentstock' => (int)($r['currentstock'] ?? 0),
             'costeach'     => round((float)($r['costeach'] ?? 0), 2),
-            'sellingprice' => round((float)($r['sellingprice'] ?? 0), 2),
+            'priceeach' => round((float)($r['priceeach'] ?? 0), 2),
             'stage'        => (string)($r['stage'] ?? ''),
         ];
     }
@@ -3341,6 +3367,57 @@ function dt_act_purchaselookups(PDO $pdo): array
     }
 
     $livestock = [];
+    foreach (dt_q(
+        $pdo,
+        "SELECT `{$l['id']}` AS livestockid, `{$l['name']}` AS name, `{$l['type']}` AS type, `{$l['stock']}` AS currentstock,
+                `{$l['cost']}` AS costeach, `{$l['price']}` AS priceeach
+           FROM `{$l['table']}` ORDER BY `{$l['name']}` ASC"
+    )->fetchAll() as $row) {
+        $livestock[] = [
+            'livestockid'  => (int)$row['livestockid'],
+            'name'         => (string)$row['name'],
+            'type'         => (string)$row['type'],
+            'currentstock' => (int)$row['currentstock'],
+            'costeach'     => dt_signed_decimal(dt_sum_to_minor((string)$row['costeach'])),
+            'priceeach'    => dt_signed_decimal(dt_sum_to_minor((string)$row['priceeach'])),
+        ];
+    }
+
+    $rows = dt_q(
+        $pdo,
+        "SELECT accountid, code, accountname FROM accounts WHERE accounttype = 'Assets' AND status = 'ON' AND parentaccountid IS NOT NULL"
+    )->fetchAll();
+    usort($rows, static fn (array $a, array $b): int => strnatcmp((string)$a['code'], (string)$b['code']));
+    $balances = dt_account_balances($pdo);
+    $accounts = [];
+    foreach ($rows as $row) {
+        $accounts[] = [
+            'accountid'   => (int)$row['accountid'],
+            'code'        => (string)$row['code'],
+            'accountname' => (string)$row['accountname'],
+            'balance'     => dt_signed_decimal($balances[(int)$row['accountid']] ?? 0),
+        ];
+    }
+
+    return ['success' => true, 'data' => [
+        'suppliers' => $suppliers,
+        'livestock' => $livestock,
+        'accounts'  => $accounts,
+        'types'     => dt_lookup_types($pdo),
+        'stages'    => dt_lookup_stages($pdo),
+    ]];
+}
+
+function dt_act_purchaselookups_old1(PDO $pdo): array
+{
+    $l = BF_LIVESTOCK;
+
+    $suppliers = [];
+    foreach (dt_q($pdo, 'SELECT supplierid, name FROM suppliers WHERE LOWER(name) <> LOWER(:n) ORDER BY name ASC', ['n' => BF_NO_SUPPLIER_NAME])->fetchAll() as $row) {
+        $suppliers[] = ['supplierid' => (int)$row['supplierid'], 'name' => (string)$row['name']];
+    }
+
+    $livestock = [];
     foreach (dt_q($pdo, "SELECT `{$l['id']}` AS livestockid, `{$l['name']}` AS name, `{$l['type']}` AS type, `{$l['stock']}` AS currentstock FROM `{$l['table']}` ORDER BY `{$l['name']}` ASC")->fetchAll() as $row) {
         $livestock[] = [
             'livestockid'  => (int)$row['livestockid'],
@@ -3453,6 +3530,44 @@ function dt_act_purchaselookups_old(PDO $pdo): array
 }
 
 /**
+ * Calculation for the Purchase form (read only): Cost Each, Purchase Cost, Paid and Balance due come from the server.
+ * Same rules as dt_read_purchase_input(). No writes, no locks, no activity log.
+ *
+ * @param PDO $pdo Connection.
+ *
+ * @return array<string,mixed> Payload (decimal text: costeach, purchasecost, paid, balance).
+ *
+ * @throws DtFail On invalid input (field "quantity", "purchasecost" or "paidamount").
+ */
+function dt_act_purchasecalc(PDO $pdo): array
+{
+    $rawQty  = trim((string)($_POST['quantity'] ?? ''));
+    $rawCost = trim((string)($_POST['purchasecost'] ?? ''));
+    $rawPaid = trim((string)($_POST['paidamount'] ?? ''));
+
+    if (!preg_match('/^\d{1,' . DT_QTY_INT_DIGITS . '}$/D', $rawQty) || (int)$rawQty <= 0) {
+        throw new DtFail('Quantity must be a whole number greater than 0.', false, 'quantity');
+    }
+    $qty  = (int)$rawQty;
+    $cost = dt_parse_decimal($rawCost, DT_TOTAL_INT_DIGITS, 2, false, 'Purchase cost must be 0 or more, with up to 2 decimals.', 'purchasecost');
+    $each = dt_cost_each($cost, $qty);
+    if ($each > DT_MAX_PRICE_MINOR) {
+        throw new DtFail('Cost each is too large (maximum ' . DT_MAX_MONEY . '). Check the purchase cost and the quantity.', false, 'purchasecost');
+    }
+    $paid = dt_parse_decimal($rawPaid === '' ? '0' : $rawPaid, DT_TOTAL_INT_DIGITS, 2, false, 'Paid amount must be 0 or more, with up to 2 decimals.', 'paidamount');
+    if ($paid > $cost) {
+        throw new DtFail('Paid amount cannot be more than the purchase cost.', false, 'paidamount');
+    }
+
+    return ['success' => true, 'data' => [
+        'costeach'     => dt_minor_to_decimal($each, 2),
+        'purchasecost' => dt_minor_to_decimal($cost, 2),
+        'paid'         => dt_minor_to_decimal($paid, 2),
+        'balance'      => dt_minor_to_decimal(max(0, $cost - $paid), 2),
+    ]];
+}
+
+/**
  * Create a livestock purchase: header, one line, stock and payment (one transaction).
  * Same rows as a purchase saved in pages/purchases.php, so it can be edited or deleted there.
  *
@@ -3533,14 +3648,14 @@ function dt_act_purchasesave(PDO $pdo): array
 
         dt_q(
             $pdo,
-            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['sellingprice']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['priceeach']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`)
              VALUES (:p, 'Livestock', :l, NULL, :q, :u, :sp, :lt, :sa)",
             [
                 'p'  => $purchaseId,
                 'l'  => $d['livestockid'],
                 'q'  => dt_minor_to_decimal($d['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
                 'u'  => dt_minor_to_decimal($d['costeach'], 2),
-                'sp' => dt_minor_to_decimal($d['sellingprice'], 2),
+                'sp' => dt_minor_to_decimal($d['priceeach'], 2),
                 'lt' => dt_minor_to_decimal($d['total'], 2),
                 'sa' => $d['qty'],
             ]
@@ -3553,11 +3668,11 @@ function dt_act_purchasesave(PDO $pdo): array
             ['q' => $d['qty'], 'id' => $d['livestockid']]
         );
 
-        /* e2. The latest purchase decides Cost Each and Selling Price of the livestock item (row already locked). */
+        /* e2. The latest purchase decides Cost Each and Price Each of the livestock item (row already locked). */
         dt_q(
             $pdo,
             "UPDATE `{$s['table']}` SET `{$s['cost']}` = :c, `{$s['price']}` = :p WHERE `{$s['id']}` = :id",
-            ['c' => dt_minor_to_decimal($d['costeach'], 2), 'p' => dt_minor_to_decimal($d['sellingprice'], 2), 'id' => $d['livestockid']]
+            ['c' => dt_minor_to_decimal($d['costeach'], 2), 'p' => dt_minor_to_decimal($d['priceeach'], 2), 'id' => $d['livestockid']]
         );
 
         /* f. Automatic payment row. */
@@ -3639,14 +3754,14 @@ function dt_act_purchasesave_old(PDO $pdo): array
 
         dt_q(
             $pdo,
-            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['sellingprice']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['priceeach']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`)
              VALUES (:p, 'Livestock', :l, NULL, :q, :u, :sp, :lt, :sa)",
             [
                 'p'  => $purchaseId,
                 'l'  => $d['livestockid'],
                 'q'  => dt_minor_to_decimal($d['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
                 'u'  => dt_minor_to_decimal($d['costeach'], 2),
-                'sp' => dt_minor_to_decimal($d['sellingprice'], 2),
+                'sp' => dt_minor_to_decimal($d['priceeach'], 2),
                 'lt' => dt_minor_to_decimal($d['total'], 2),
                 'sa' => $d['qty'],
             ]
@@ -3671,7 +3786,7 @@ function dt_act_purchasesave_old(PDO $pdo): array
 }
 
 /**
- * Options for the sale modal: customers, livestock (stock, cost each, selling price) and the Assets sub-accounts that can receive money.
+ * Options for the sale modal: customers, livestock (stock, cost each, Price Each) and the Assets sub-accounts that can receive money.
  *
  * @param PDO $pdo Connection.
  *
@@ -3770,7 +3885,7 @@ function dt_act_salesave(PDO $pdo): array
         $invoiceId = (int)$pdo->lastInsertId();
 
         $ins = $pdo->prepare(
-            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['sellingprice']}`, `{$i['costeach']}``, `{$i['linetotal']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['costeach']}`, `{$i['linetotal']}`)
              VALUES (:p, 'Livestock', :l, NULL, :q, :u, :uc, :lt)"
         );
         foreach ($d['lines'] as $l) {
@@ -3862,7 +3977,7 @@ function dt_act_salesave_prev(PDO $pdo): array
         $invoiceId = (int)$pdo->lastInsertId();
 
         $ins = $pdo->prepare(
-            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['sellingprice']}`, `{$i['costeach']}``, `{$i['linetotal']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['costeach']}`, `{$i['linetotal']}`)
              VALUES (:p, 'Livestock', :l, NULL, :q, :u, :uc, :lt)"
         );
         foreach ($d['lines'] as $l) {
@@ -3950,14 +4065,14 @@ function dt_act_salesave_old(PDO $pdo): array
 
         dt_q(
             $pdo,
-            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['sellingprice']}`, `{$i['costeach']}``, `{$i['linetotal']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['costeach']}`, `{$i['linetotal']}`)
              VALUES (:p, 'Livestock', :l, NULL, :q, :u, :uc, :lt)",
             [
                 'p'  => $invoiceId,
                 'l'  => $d['livestockid'],
                 'q'  => $d['qty'],
                 'u'  => dt_minor_to_decimal($d['costeach'], 2),
-                'sp' => dt_minor_to_decimal($d['sellingprice'], 2),
+                'sp' => dt_minor_to_decimal($d['priceeach'], 2),
                 'uc' => (string)$animal['unitcost'],
                 'lt' => dt_minor_to_decimal($d['total'], 2),
             ]
@@ -3982,7 +4097,7 @@ function dt_act_salesave_old(PDO $pdo): array
 }
 
 /**
- * Options and values for the Edit Sale modal: customers, livestock (stock, cost each, selling price), accounts, the invoice and its lines.
+ * Options and values for the Edit Sale modal: customers, livestock (stock, cost each, Price Each), accounts, the invoice and its lines.
  *
  * @param PDO $pdo Connection.
  *
@@ -4004,7 +4119,7 @@ function dt_act_saleeditlookups(PDO $pdo): array
     $held  = [];
     foreach (dt_q(
         $pdo,
-        "SELECT `{$it['itemtype']}` AS itemtype, `{$it['livestockid']}` AS livestockid, `{$it['quantity']}` AS quantity, `{$it['sellingprice']}` AS sellingprice
+        "SELECT `{$it['itemtype']}` AS itemtype, `{$it['livestockid']}` AS livestockid, `{$it['quantity']}` AS quantity, `{$it['priceeach']}` AS priceeach
            FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id ORDER BY `{$it['id']}` ASC",
         ['id' => $id]
     )->fetchAll() as $r) {
@@ -4013,7 +4128,7 @@ function dt_act_saleeditlookups(PDO $pdo): array
         }
         $lid        = (int)$r['livestockid'];
         $held[$lid] = ($held[$lid] ?? 0) + (int)$r['quantity'];
-        $lines[]    = ['livestockid' => $lid, 'quantity' => (int)$r['quantity'], 'sellingprice' => dt_signed_decimal(dt_sum_to_minor((string)$r['sellingprice']))];
+        $lines[]    = ['livestockid' => $lid, 'quantity' => (int)$r['quantity'], 'priceeach' => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach']))];
     }
 
     $flags  = dt_invoice_flags($pdo, $id);
@@ -4064,7 +4179,7 @@ function dt_act_saleupdate(PDO $pdo): array
         foreach (dt_q(
             $pdo,
             "SELECT `{$it['itemtype']}` AS itemtype, `{$it['livestockid']}` AS livestockid, `{$it['quantity']}` AS quantity,
-                    `{$it['sellingprice']}` AS sellingprice, `{$it['costeach']}` AS costeach, `{$it['linetotal']}` AS linetotal
+                    `{$it['priceeach']}` AS priceeach, `{$it['costeach']}` AS costeach, `{$it['linetotal']}` AS linetotal
                FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id ORDER BY `{$it['id']}` ASC FOR UPDATE",
             ['id' => $id]
         )->fetchAll() as $row) {
@@ -4074,7 +4189,7 @@ function dt_act_saleupdate(PDO $pdo): array
             $old[] = [
                 'livestockid' => (int)$row['livestockid'],
                 'qty'         => (int)$row['quantity'],
-                'price'       => dt_decimal_to_minor((string)$row['sellingprice'], 2),
+                'price'       => dt_decimal_to_minor((string)$row['priceeach'], 2),
                 'total'       => dt_decimal_to_minor((string)$row['linetotal'], 2),
                 'cost'        => (string)$row['costeach'],
             ];
@@ -4195,7 +4310,7 @@ function dt_act_saleupdate(PDO $pdo): array
             }
             dt_q($pdo, "DELETE FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id", ['id' => $id]);
             $ins = $pdo->prepare(
-                "INSERT INTO `{$it['table']}` (`{$it['invoiceid']}`, `{$it['itemtype']}`, `{$it['livestockid']}`, `{$it['productid']}`, `{$it['quantity']}`, `{$it['sellingprice']}`, `{$it['costeach']}``, `{$it['linetotal']}`)
+                "INSERT INTO `{$it['table']}` (`{$it['invoiceid']}`, `{$it['itemtype']}`, `{$it['livestockid']}`, `{$it['productid']}`, `{$it['quantity']}`, `{$it['priceeach']}`, `{$it['costeach']}`, `{$it['linetotal']}`)
                  VALUES (:p, 'Livestock', :l, NULL, :q, :u, :uc, :lt)"
             );
             foreach ($lines as $l) {
@@ -4317,7 +4432,7 @@ function dt_act_quotationsave(PDO $pdo): array
         $quotationId = (int)$pdo->lastInsertId();
 
         $ins = $pdo->prepare(
-            "INSERT INTO `{$i['table']}` (`{$i['quotationid']}`, `{$i['livestockid']}`, `{$i['quantity']}`, `{$i['sellingprice']}`, `{$i['linetotal']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['quotationid']}`, `{$i['livestockid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['linetotal']}`)
              VALUES (:q, :l, :n, :u, :lt)"
         );
         foreach ($d['lines'] as $l) {
@@ -4391,7 +4506,7 @@ function dt_act_quotationsave_prev(PDO $pdo): array
         $quotationId = (int)$pdo->lastInsertId();
 
         $ins = $pdo->prepare(
-            "INSERT INTO `{$i['table']}` (`{$i['quotationid']}`, `{$i['livestockid']}`, `{$i['quantity']}`, `{$i['sellingprice']}`, `{$i['linetotal']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['quotationid']}`, `{$i['livestockid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['linetotal']}`)
              VALUES (:q, :l, :n, :u, :lt)"
         );
         foreach ($d['lines'] as $l) {
@@ -4455,7 +4570,7 @@ function dt_act_saleget(PDO $pdo): array
     foreach (dt_q(
         $pdo,
         "SELECT x.`{$it['id']}` AS invoiceitemid, x.`{$it['itemtype']}` AS itemtype, x.`{$it['quantity']}` AS quantity,
-                x.`{$it['sellingprice']}` AS sellingprice, x.`{$it['linetotal']}` AS linetotal,
+                x.`{$it['priceeach']}` AS priceeach, x.`{$it['linetotal']}` AS linetotal,
                 lv.`{$l['name']}` AS livestockname, lv.`{$l['type']}` AS livestocktype, p.name AS productname,
                 COALESCE((SELECT SUM(q.`{$ri['quantity']}`) FROM `{$ri['table']}` q WHERE q.`{$ri['invoiceitemid']}` = x.`{$it['id']}`), 0) AS returnedqty
            FROM `{$it['table']}` x
@@ -4476,7 +4591,7 @@ function dt_act_saleget(PDO $pdo): array
             'quantity'      => $quantity,
             'returnedqty'   => $returnedQty,
             'returnable'    => $isLivestock ? max(0, $quantity - $returnedQty) : 0,
-            'sellingprice'  => dt_signed_decimal(dt_sum_to_minor((string)$r['sellingprice'])),
+            'priceeach'  => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach'])),
             'linetotal'     => dt_signed_decimal(dt_sum_to_minor((string)$r['linetotal'])),
         ];
     }
@@ -4572,7 +4687,7 @@ function dt_act_returnsave(PDO $pdo): array
         $invoiceLines = [];
         foreach (dt_q(
             $pdo,
-            "SELECT `{$it['id']}` AS invoiceitemid, `{$it['livestockid']}` AS livestockid, `{$it['quantity']}` AS quantity, `{$it['sellingprice']}` AS sellingprice
+            "SELECT `{$it['id']}` AS invoiceitemid, `{$it['livestockid']}` AS livestockid, `{$it['quantity']}` AS quantity, `{$it['priceeach']}` AS priceeach
                FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id AND `{$it['itemtype']}` = 'Livestock'",
             ['id' => $d['invoiceid']]
         )->fetchAll() as $row) {
@@ -4625,7 +4740,7 @@ function dt_act_returnsave(PDO $pdo): array
             }
             $added[$lid] = ($added[$lid] ?? 0) + $l['qty'];
 
-            $price     = dt_decimal_to_minor((string)$line['sellingprice'], 2);
+            $price     = dt_decimal_to_minor((string)$line['priceeach'], 2);
             $lineTotal = $l['qty'] * $price;
             $total    += $lineTotal;
             if ($total > DT_MAX_TOTAL_MINOR) {
@@ -4652,7 +4767,7 @@ function dt_act_returnsave(PDO $pdo): array
         foreach ($rows as $row) {
             dt_q(
                 $pdo,
-                "INSERT INTO `{$ri['table']}` (`{$ri['returnid']}`, `{$ri['invoiceitemid']}`, `{$ri['livestockid']}`, `{$ri['quantity']}`, `{$ri['sellingprice']}`, `{$ri['linetotal']}`)
+                "INSERT INTO `{$ri['table']}` (`{$ri['returnid']}`, `{$ri['invoiceitemid']}`, `{$ri['livestockid']}`, `{$ri['quantity']}`, `{$ri['priceeach']}`, `{$ri['linetotal']}`)
                  VALUES (:r, :ii, :l, :q, :u, :lt)",
                 [
                     'r'  => $returnId,
@@ -5028,6 +5143,7 @@ function dt_handle_post(): never
         'stageupdate'         => 'dt_act_stageupdate',
         'stagedelete'         => 'dt_act_stagedelete',
         'supplierposition'     => 'dt_act_supplierposition',
+        'purchasecalc'         => 'dt_act_purchasecalc',
     ];
     $action   = (string)($_POST['action'] ?? '');
     if (!isset($handlers[$action])) {
@@ -5243,7 +5359,7 @@ function dt_act_quotationget(PDO $pdo): array
     foreach (dt_q(
         $pdo,
         "SELECT lv.`{$l['name']}` AS name, lv.`{$l['type']}` AS type, x.`{$i['quantity']}` AS quantity,
-                x.`{$i['sellingprice']}` AS sellingprice, x.`{$i['linetotal']}` AS linetotal
+                x.`{$i['priceeach']}` AS priceeach, x.`{$i['linetotal']}` AS linetotal
            FROM `{$i['table']}` x
       LEFT JOIN `{$l['table']}` lv ON lv.`{$l['id']}` = x.`{$i['livestockid']}`
           WHERE x.`{$i['quotationid']}` = :id ORDER BY x.`{$i['id']}` ASC",
@@ -5253,7 +5369,7 @@ function dt_act_quotationget(PDO $pdo): array
             'name'      => (string)($r['name'] ?? ''),
             'type'      => (string)($r['type'] ?? ''),
             'quantity'  => (string)(int)$r['quantity'],
-            'sellingprice' => dt_signed_decimal(dt_sum_to_minor((string)$r['sellingprice'])),
+            'priceeach' => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach'])),
             'linetotal' => dt_signed_decimal(dt_sum_to_minor((string)$r['linetotal'])),
         ];
     }
@@ -5283,14 +5399,14 @@ function dt_act_quotationeditlookups(PDO $pdo): array
     $lines = [];
     foreach (dt_q(
         $pdo,
-        "SELECT `{$i['livestockid']}` AS livestockid, `{$i['quantity']}` AS quantity, `{$i['sellingprice']}` AS sellingprice
+        "SELECT `{$i['livestockid']}` AS livestockid, `{$i['quantity']}` AS quantity, `{$i['priceeach']}` AS priceeach
            FROM `{$i['table']}` WHERE `{$i['quotationid']}` = :id ORDER BY `{$i['id']}` ASC",
         ['id' => $id]
     )->fetchAll() as $r) {
         $lines[] = [
             'livestockid' => (int)$r['livestockid'],
             'quantity'    => (int)$r['quantity'],
-            'sellingprice' => dt_signed_decimal(dt_sum_to_minor((string)$r['sellingprice'])),
+            'priceeach' => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach'])),
         ];
     }
 
@@ -5355,7 +5471,7 @@ function dt_act_quotationupdate(PDO $pdo): array
 
         dt_q($pdo, "DELETE FROM `{$i['table']}` WHERE `{$i['quotationid']}` = :id", ['id' => $id]);
         $ins = $pdo->prepare(
-            "INSERT INTO `{$i['table']}` (`{$i['quotationid']}`, `{$i['livestockid']}`, `{$i['quantity']}`, `{$i['sellingprice']}`, `{$i['linetotal']}`)
+            "INSERT INTO `{$i['table']}` (`{$i['quotationid']}`, `{$i['livestockid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['linetotal']}`)
              VALUES (:q, :l, :n, :u, :lt)"
         );
         foreach ($d['lines'] as $l) {
@@ -5461,7 +5577,7 @@ function dt_act_purchaseget(PDO $pdo): array
     foreach (dt_q(
         $pdo,
         "SELECT x.`{$i['itemtype']}` AS itemtype, x.`{$i['quantity']}` AS quantity, x.`{$i['costeach']}` AS costeach,
-                x.`{$i['sellingprice']}` AS sellingprice, x.`{$i['purchasecost']}` AS purchasecost,
+                x.`{$i['priceeach']}` AS priceeach, x.`{$i['purchasecost']}` AS purchasecost,
                 lv.`{$l['name']}` AS livestockname, lv.`{$l['type']}` AS livestocktype, pr.name AS productname
            FROM `{$i['table']}` x
       LEFT JOIN `{$l['table']}` lv ON lv.`{$l['id']}` = x.`{$i['livestockid']}`
@@ -5476,7 +5592,7 @@ function dt_act_purchaseget(PDO $pdo): array
             'type'         => $isLivestock ? (string)($r['livestocktype'] ?? '') : 'Product',
             'quantity'     => dt_trim_qty((string)$r['quantity']),
             'costeach'     => dt_signed_decimal(dt_sum_to_minor((string)$r['costeach'])),
-            'sellingprice' => dt_signed_decimal(dt_sum_to_minor((string)$r['sellingprice'])),
+            'priceeach' => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach'])),
             'purchasecost' => dt_signed_decimal(dt_sum_to_minor((string)$r['purchasecost'])),
         ];
     }
@@ -5508,7 +5624,7 @@ function dt_act_purchaseget_v1(PDO $pdo): array
     $lines = [];
     foreach (dt_q(
         $pdo,
-        "SELECT x.`{$i['itemtype']}` AS itemtype, x.`{$i['quantity']}` AS quantity, x.`{$i['sellingprice']}` AS sellingprice, x.`{$i['linetotal']}` AS linetotal,
+        "SELECT x.`{$i['itemtype']}` AS itemtype, x.`{$i['quantity']}` AS quantity, x.`{$i['priceeach']}` AS priceeach, x.`{$i['linetotal']}` AS linetotal,
                 lv.`{$l['name']}` AS livestockname, lv.`{$l['type']}` AS livestocktype, pr.name AS productname
            FROM `{$i['table']}` x
       LEFT JOIN `{$l['table']}` lv ON lv.`{$l['id']}` = x.`{$i['livestockid']}`
@@ -5522,7 +5638,7 @@ function dt_act_purchaseget_v1(PDO $pdo): array
             'name'      => $isLivestock ? (string)($r['livestockname'] ?? '') : (string)($r['productname'] ?? ''),
             'type'      => $isLivestock ? (string)($r['livestocktype'] ?? '') : 'Product',
             'quantity'  => dt_trim_qty((string)$r['quantity']),
-            'sellingprice' => dt_signed_decimal(dt_sum_to_minor((string)$r['sellingprice'])),
+            'priceeach' => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach'])),
             'linetotal' => dt_signed_decimal(dt_sum_to_minor((string)$r['linetotal'])),
         ];
     }
@@ -5556,7 +5672,7 @@ function dt_act_purchaseeditlookups(PDO $pdo): array
     $i    = BF_PURCHASEITEMS;
     $line = dt_q(
         $pdo,
-        "SELECT `{$i['livestockid']}` AS livestockid, `{$i['quantity']}` AS quantity, `{$i['purchasecost']}` AS purchasecost, `{$i['sellingprice']}` AS sellingprice, `{$i['stockadded']}` AS stockadded
+        "SELECT `{$i['livestockid']}` AS livestockid, `{$i['quantity']}` AS quantity, `{$i['purchasecost']}` AS purchasecost, `{$i['priceeach']}` AS priceeach, `{$i['stockadded']}` AS stockadded
            FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id AND `{$i['itemtype']}` = 'Livestock'",
         ['id' => $id]
     )->fetch();
@@ -5586,7 +5702,7 @@ function dt_act_purchaseeditlookups(PDO $pdo): array
             'livestockid' => (int)$line['livestockid'],
             'quantity'    => (int)explode('.', (string)$line['quantity'])[0],
             'purchasecost' => dt_signed_decimal(dt_sum_to_minor((string)$line['purchasecost'])),
-            'sellingprice' => dt_signed_decimal(dt_sum_to_minor((string)$line['sellingprice'])),
+            'priceeach' => dt_signed_decimal(dt_sum_to_minor((string)$line['priceeach'])),
         ],
         'manual'    => $pay['manual'],
     ]];
@@ -5719,13 +5835,13 @@ function dt_act_purchaseupdate(PDO $pdo): array
         );
         dt_q(
             $pdo,
-            "UPDATE `{$i['table']}` SET `{$i['livestockid']}` = :l, `{$i['quantity']}` = :q, `{$i['costeach']}` = :u, `{$i['sellingprice']}` = :sp, `{$i['purchasecost']}` = :lt, `{$i['stockadded']}` = :sa
+            "UPDATE `{$i['table']}` SET `{$i['livestockid']}` = :l, `{$i['quantity']}` = :q, `{$i['costeach']}` = :u, `{$i['priceeach']}` = :sp, `{$i['purchasecost']}` = :lt, `{$i['stockadded']}` = :sa
               WHERE `{$i['id']}` = :id",
             [
                 'l'  => $d['livestockid'],
                 'q'  => dt_minor_to_decimal($d['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
                 'u'  => dt_minor_to_decimal($d['costeach'], 2),
-                'sp' => dt_minor_to_decimal($d['sellingprice'], 2),
+                'sp' => dt_minor_to_decimal($d['priceeach'], 2),
                 'lt' => dt_minor_to_decimal($d['total'], 2),
                 'sa' => $d['qty'],
                 'id' => $oldItem,
@@ -5740,11 +5856,11 @@ function dt_act_purchaseupdate(PDO $pdo): array
             }
         }
 
-        /* h2. The purchase sets Cost Each and Selling Price of the livestock item (row already locked). */
+        /* h2. The purchase sets Cost Each and Price Each of the livestock item (row already locked). */
         dt_q(
             $pdo,
             "UPDATE `{$s['table']}` SET `{$s['cost']}` = :c, `{$s['price']}` = :p WHERE `{$s['id']}` = :id",
-            ['c' => dt_minor_to_decimal($d['costeach'], 2), 'p' => dt_minor_to_decimal($d['sellingprice'], 2), 'id' => $d['livestockid']]
+            ['c' => dt_minor_to_decimal($d['costeach'], 2), 'p' => dt_minor_to_decimal($d['priceeach'], 2), 'id' => $d['livestockid']]
         );
 
         /* i. Automatic payment row (skipped when payments were entered on the Payments page). */
@@ -6090,7 +6206,7 @@ function dt_act_livestockquicksave(PDO $pdo): array
         throw new DtFail('Select a valid stage.', false, 'stage');
     }
     $cost  = '0.00'; // the purchase sets Cost Each
-    $price = '0.00'; // the purchase sets Selling Price
+    $price = '0.00'; // the purchase sets Price Each
 
     return dt_transaction(static function (PDO $pdo) use ($name, $type, $stage, $cost, $price): array {
         $s = BF_LIVESTOCK;
@@ -6111,7 +6227,7 @@ function dt_act_livestockquicksave(PDO $pdo): array
             'type'         => $type,
             'currentstock' => 0,
             'costeach'     => $cost,
-            'sellingprice' => $price,
+            'priceeach' => $price,
         ]];
     });
 }
@@ -6136,7 +6252,7 @@ function dt_act_livestockquicksave_oldstatus(PDO $pdo): array
         throw new DtFail('Select a valid status.', false, 'status');
     }
     $cost  = '0.00'; // the purchase sets Cost Each
-    $price = '0.00'; // the purchase sets Selling Price
+    $price = '0.00'; // the purchase sets Price Each
 
     return dt_transaction(static function (PDO $pdo) use ($name, $type, $status, $cost, $price): array {
         $s = BF_LIVESTOCK;
@@ -6157,7 +6273,7 @@ function dt_act_livestockquicksave_oldstatus(PDO $pdo): array
             'type'         => $type,
             'currentstock' => 0,
             'costeach'     => $cost,
-            'sellingprice' => $price,
+            'priceeach' => $price,
         ]];
     });
 }
@@ -6773,7 +6889,7 @@ function dt_view_list(): void
                       <th class="px140">Type</th>
                       <th class="px140">Current Stock</th>
                       <th class="px120">Cost Each</th>
-                      <th class="px120">Selling Price</th>
+                      <th class="px120">Price Each</th>
                       <th class="px120">Stage</th>
                       <th class="px220 text-center">Action</th>
                     </tr>
@@ -6855,9 +6971,9 @@ function dt_modal_livestock(): void
               <div class="invalid-feedback" id="lCostEachFb">Cost each must be 0 or more, with up to 2 decimals.</div>
             </div>
             <div class="form-group col-sm-6">
-              <label for="lSellingPrice">Selling Price <span class="req">*</span></label>
-              <input type="number" class="form-control" id="lSellingPrice" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0.00" required aria-describedby="lSellingPriceFb">
-              <div class="invalid-feedback" id="lSellingPriceFb">Selling price must be 0 or more, with up to 2 decimals.</div>
+              <label for="lpriceeach">Price Each <span class="req">*</span></label>
+              <input type="number" class="form-control" id="lpriceeach" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0.00" required aria-describedby="lpriceeachFb">
+              <div class="invalid-feedback" id="lpriceeachFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
           </div>
           <div class="form-group mb-0">
@@ -6939,9 +7055,9 @@ function dt_modal_livestock_old(): void
               <div class="invalid-feedback" id="lCostEachFb">Cost each must be 0 or more, with up to 2 decimals.</div>
             </div>
             <div class="form-group col-sm-6">
-              <label for="lSellingPrice">Selling Price <span class="req">*</span></label>
-              <input type="number" class="form-control" id="lSellingPrice" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0.00" required aria-describedby="lSellingPriceFb">
-              <div class="invalid-feedback" id="lSellingPriceFb">Selling price must be 0 or more, with up to 2 decimals.</div>
+              <label for="lpriceeach">Price Each <span class="req">*</span></label>
+              <input type="number" class="form-control" id="lpriceeach" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0.00" required aria-describedby="lpriceeachFb">
+              <div class="invalid-feedback" id="lpriceeachFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
           </div>
           <div class="form-group mb-0">
@@ -7100,14 +7216,12 @@ function dt_modal_purchase(): void
                   </div>
                 </div>
                 <div class="form-group">
-                  </div><!-- cost each and selling price are not typed here: the purchase sets them
-                  <input type="number" class="form-control" id="qlvCost" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0.00" aria-describedby="qlvCostFb">
-                  <div class="invalid-feedback" id="qlvCostFb" data-default="Enter an amount from 0.00 to <?= DT_MAX_MONEY ?>.">Enter an amount from 0.00 to <?= DT_MAX_MONEY ?>.</div>
+                  </div><!-- cost each and Price Each are not typed here: the purchase sets them
+
+
                 </div>
                 <div class="form-group">
-    
-                  <input type="number" class="form-control" id="qlvPrice" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0.00" aria-describedby="qlvPriceFb">
-                  <div class="invalid-feedback" id="qlvPriceFb" data-default="Enter an amount from 0.00 to <?= DT_MAX_MONEY ?>.">Enter an amount from 0.00 to <?= DT_MAX_MONEY ?>.</div>
+
                 </div>
               </div>
               <div class="quick-actions">
@@ -7135,10 +7249,10 @@ function dt_modal_purchase(): void
               <div class="helper-line" id="puCostEachHelp">Purchase Cost divided by Quantity.</div>
             </div>
             <div class="form-group">
-              <label for="puSellingPrice">Selling Price ($) <span class="req">*</span></label>
-              <input type="number" class="form-control" id="puSellingPrice" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" required aria-describedby="puSellingPriceHelp puSellingPriceFb">
-              <div class="helper-line" id="puSellingPriceHelp">Selling price of one animal.</div>
-              <div class="invalid-feedback" id="puSellingPriceFb">Selling price must be 0 or more, with up to 2 decimals.</div>
+              <label for="pupriceeach">Price Each ($) <span class="req">*</span></label>
+              <input type="number" class="form-control" id="pupriceeach" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" required aria-describedby="pupriceeachHelp pupriceeachFb">
+              <div class="helper-line" id="pupriceeachHelp">Price of one animal.</div>
+              <div class="invalid-feedback" id="pupriceeachFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
             <div class="form-group">
               <label for="puPaid">Paid Amount ($)</label>
@@ -7232,10 +7346,10 @@ function dt_modal_purchase_old(): void
               <div class="helper-line" id="puCostEachHelp">Purchase Cost divided by Quantity.</div>
             </div>
             <div class="form-group">
-              <label for="puSellingPrice">Selling Price ($) <span class="req">*</span></label>
-              <input type="number" class="form-control" id="puSellingPrice" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" required aria-describedby="puSellingPriceHelp puSellingPriceFb">
-              <div class="helper-line" id="puSellingPriceHelp">Selling price of one animal.</div>
-              <div class="invalid-feedback" id="puSellingPriceFb">Selling price must be 0 or more, with up to 2 decimals.</div>
+              <label for="pupriceeach">Price Each ($) <span class="req">*</span></label>
+              <input type="number" class="form-control" id="pupriceeach" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" required aria-describedby="pupriceeachHelp pupriceeachFb">
+              <div class="helper-line" id="pupriceeachHelp">Price of one animal.</div>
+              <div class="invalid-feedback" id="pupriceeachFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
             <div class="form-group">
               <label for="puPaid">Paid Amount ($)</label>
@@ -7369,7 +7483,7 @@ function dt_modal_sale(): void
                 <tr>
                   <th>Livestock</th>
                   <th class="w-qty">Quantity</th>
-                  <th class="w-price">Selling Price ($)</th>
+                  <th class="w-price">Price Each ($)</th>
                   <th class="w-total text-right">Line Total</th>
                   <th class="w-rm text-center"><span class="sr-only">Remove</span></th>
                 </tr>
@@ -7456,7 +7570,7 @@ function dt_modal_sale_v1(): void
                 <tr>
                   <th>Livestock</th>
                   <th class="w-qty">Quantity</th>
-                  <th class="w-price">Selling Price ($)</th>
+                  <th class="w-price">Price Each ($)</th>
                   <th class="w-total text-right">Line Total</th>
                   <th class="w-rm text-center"><span class="sr-only">Remove</span></th>
                 </tr>
@@ -7537,7 +7651,7 @@ function dt_modal_sale_prev(): void
                 <tr>
                   <th>Livestock</th>
                   <th class="w-qty">Quantity</th>
-                  <th class="w-price">Selling Price ($)</th>
+                  <th class="w-price">Price Each ($)</th>
                   <th class="w-total text-right">Line Total</th>
                   <th class="w-rm text-center"><span class="sr-only">Remove</span></th>
                 </tr>
@@ -7608,10 +7722,10 @@ function dt_modal_sale_old(): void
               <div class="invalid-feedback" id="saQtyFb">Quantity must be a whole number greater than 0.</div>
             </div>
             <div class="form-group">
-              <label for="saPrice">Selling Price ($) <span class="req">*</span></label>
+              <label for="saPrice">Price Each ($) <span class="req">*</span></label>
               <input type="number" class="form-control" id="saPrice" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" required aria-describedby="saPriceHelp saPriceFb">
               <div class="helper-line" id="saPriceHelp" aria-live="polite"></div>
-              <div class="invalid-feedback" id="saPriceFb">Selling price must be 0 or more, with up to 2 decimals.</div>
+              <div class="invalid-feedback" id="saPriceFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
             <div class="form-group">
               <label for="saTotal">Total</label>
@@ -7754,7 +7868,7 @@ function dt_modal_quotation(): void
                 <tr>
                   <th>Livestock</th>
                   <th class="w-qty">Quantity</th>
-                  <th class="w-price">Selling Price ($)</th>
+                  <th class="w-price">Price Each ($)</th>
                   <th class="w-total text-right">Line Total</th>
                   <th class="w-rm text-center"><span class="sr-only">Remove</span></th>
                 </tr>
@@ -7845,7 +7959,7 @@ function dt_modal_quotation_old(): void
                 <tr>
                   <th>Livestock</th>
                   <th class="w-qty">Quantity</th>
-                  <th class="w-price">Selling Price ($)</th>
+                  <th class="w-price">Price Each ($)</th>
                   <th class="w-total text-right">Line Total</th>
                   <th class="w-rm text-center"><span class="sr-only">Remove</span></th>
                 </tr>
@@ -7957,7 +8071,7 @@ function dt_modal_invoice(): void
                     <th>Livestock</th>
                     <th class="px140">Type</th>
                     <th class="px120 text-right">Quantity</th>
-                    <th class="px140 text-right">Selling Price</th>
+                    <th class="px140 text-right">Price Each</th>
                     <th class="px140 text-right">Line total</th>
                   </tr>
                 </thead>
@@ -8036,7 +8150,7 @@ function dt_modal_return(): void
                   <th class="text-right">Already returned</th>
                   <th class="text-right">Returnable</th>
                   <th class="w-qty">Return quantity</th>
-                  <th class="w-price text-right">Selling Price</th>
+                  <th class="w-price text-right">Price Each</th>
                   <th class="w-total text-right">Line total</th>
                 </tr>
               </thead>
@@ -8275,7 +8389,7 @@ function dt_modal_quotationview(): void
                     <th>Livestock</th>
                     <th class="px140">Type</th>
                     <th class="px120 text-right">Quantity</th>
-                    <th class="px140 text-right">Selling Price</th>
+                    <th class="px140 text-right">Price Each</th>
                     <th class="px140 text-right">Line total</th>
                   </tr>
                 </thead>
@@ -8416,7 +8530,7 @@ function dt_modal_purchaseview(): void
                     <th>Item</th>
                     <th class="px140">Type</th>
                     <th class="px120 text-right">Quantity</th>
-                    <th class="px140 text-right">Selling Price</th>
+                    <th class="px140 text-right">Cost Each</th>
                     <th class="px140 text-right">Line total</th>
                   </tr>
                 </thead>
@@ -8735,12 +8849,12 @@ $n         = dt_n();
 
     // Money display: 1,234.50
     function money(v) {
-      return Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      return minorMoney(toMinorSigned(String(v))).replace('$', '');
     }
 
     // Valid money text: up to 7 digits, up to 2 decimals
     function validMoney(v) {
-      return /^\d{1,7}(\.\d{1,2})?$/.test(v) && Number(v) <= CFG.maxMoney;
+      return /^\d{1,7}(\.\d{1,2})?$/.test(v);
     }
 
     // POST helper: always sends CSRF, expects JSON
@@ -8777,11 +8891,11 @@ $n         = dt_n();
         },
         {
           data: 'costeach', className: 'text-right',
-          render: function (d, type) { return type === 'display' || type === 'filter' ? money(d) : d; }
+          render: function (d, type) { return type === 'display' || type === 'filter' ? money(d) : Number(toMinorSigned(d)); }
         },
         {
-          data: 'sellingprice', className: 'text-right',
-          render: function (d, type) { return type === 'display' || type === 'filter' ? money(d) : d; }
+          data: 'priceeach', className: 'text-right',
+          render: function (d, type) { return type === 'display' || type === 'filter' ? money(d) : Number(toMinorSigned(d)); }
         },
         {
           data: 'stage',
@@ -8821,16 +8935,16 @@ $n         = dt_n();
     var TYPE_REQUIRED = 'Type is required.';
     var STOCK_INVALID = $('#lStockFb').text();
     var COST_INVALID = $('#lCostEachFb').text();
-    var PRICE_INVALID = $('#lSellingPriceFb').text();
+    var PRICE_INVALID = $('#lpriceeachFb').text();
     var STAGE_REQUIRED = 'Stage is required.';
 
     function clearInvalid() {
-      $('#lName, #lType, #lStock, #lCostEach, #lSellingPrice, #lStage').removeClass('is-invalid');
+      $('#lName, #lType, #lStock, #lCostEach, #lpriceeach, #lStage').removeClass('is-invalid');
       $('#lNameFb').text(NAME_REQUIRED);
       $('#lTypeFb').text(TYPE_REQUIRED);
       $('#lStockFb').text(STOCK_INVALID);
       $('#lCostEachFb').text(COST_INVALID);
-      $('#lSellingPriceFb').text(PRICE_INVALID);
+      $('#lpriceeachFb').text(PRICE_INVALID);
       $('#lStageFb').text(STAGE_REQUIRED);
     }
 
@@ -8841,8 +8955,8 @@ $n         = dt_n();
       $('#lName').val(d ? d.name : '');
       $('#lType').val(d ? d.type : '');
       $('#lStock').val(d ? d.currentstock : 0);
-      $('#lCostEach').val(d ? Number(d.costeach).toFixed(2) : '0.00');
-      $('#lSellingPrice').val(d ? Number(d.sellingprice).toFixed(2) : '0.00');
+      $('#lCostEach').val(d ? d.costeach : '0.00');
+      $('#lPriceEach').val(d ? d.priceeach : '0.00');
       $('#lStage').val(d ? d.stage : 'Active');
       $('#livestockModalTitle').text(d ? 'Edit Livestock' : 'Add Livestock');
       $('#livestockModal').modal('show');
@@ -8851,7 +8965,7 @@ $n         = dt_n();
     $('#btnAdd').on('click', function () { openLivestockModal(null); });
     $('#livestockTable tbody').on('click', '.btn-edit', function () { openLivestockModal(rowData(this)); });
     $('#livestockModal').on('shown.bs.modal', function () { $('#lName').trigger('focus'); });
-    $('#lName, #lType, #lStock, #lCostEach, #lSellingPrice, #lStage').on('input', function () { $(this).removeClass('is-invalid'); });
+    $('#lName, #lType, #lStock, #lCostEach, #lpriceeach, #lStage').on('input', function () { $(this).removeClass('is-invalid'); });
 
     /* ---------- Save (add / edit) ---------- */
     $('#livestockForm').on('submit', function (e) {
@@ -8862,7 +8976,7 @@ $n         = dt_n();
       var type   = $.trim($('#lType').val());
       var stock  = $.trim($('#lStock').val());
       var cost   = $.trim($('#lCostEach').val());
-      var price  = $.trim($('#lSellingPrice').val());
+      var price  = $.trim($('#lpriceeach').val());
       var stage = $.trim($('#lStage').val());
       if (name === '') {
         $('#lName').addClass('is-invalid').trigger('focus');
@@ -8881,7 +8995,7 @@ $n         = dt_n();
         return;
       }
       if (!validMoney(price)) {
-        $('#lSellingPrice').addClass('is-invalid').trigger('focus');
+        $('#lpriceeach').addClass('is-invalid').trigger('focus');
         return;
       }
       if (stage === '') {
@@ -8897,7 +9011,7 @@ $n         = dt_n();
         type: type,
         currentstock: stock,
         costeach: cost,
-        sellingprice: price,
+        priceeach: price,
         stage: stage
       }).done(function (res) {
         if (res.success) {
@@ -8918,9 +9032,9 @@ $n         = dt_n();
         } else if (res.field === 'costeach') {
           $('#lCostEachFb').text(res.message);
           $('#lCostEach').addClass('is-invalid').trigger('focus');
-        } else if (res.field === 'sellingprice') {
-          $('#lSellingPriceFb').text(res.message);
-          $('#lSellingPrice').addClass('is-invalid').trigger('focus');
+        } else if (res.field === 'priceeach') {
+          $('#lpriceeachFb').text(res.message);
+          $('#lpriceeach').addClass('is-invalid').trigger('focus');
         } else if (res.field === 'stage') {
           $('#lStageFb').text(res.message);
           $('#lStage').addClass('is-invalid').trigger('focus');
@@ -9005,18 +9119,23 @@ $n         = dt_n();
     }
 
     /* ---------- Field map (server field keys) ---------- */
-    var puSellingTouched = false, puCostFlagged = false, puCostBlocked = false;
-    var MAX_PRICE_MINOR = 999999999n; // 9,999,999.99
+    var puPriceTouched = false, puCostFlagged = false, puCostBlocked = false;
+    var puCalcSeq = 0, puCalcTimer = null, puCalcOk = false, puCalcMsg = '', puCalcFlag = '';
+   
 
-    // Cost Each = Purchase Cost / Quantity, rounded half up (BigInt minor units; the one JavaScript helper)
-    function costEachMinor(costMinor, qty) { return (2n * costMinor + qty) / (2n * qty); }
+    // Cost Each is calculated ONLY by the server (action purchasecalc). The browser shows the text it receives.
+   
 
-    // Selling Price of a livestock item, read from the Livestock table (used as the default in the Purchase form)
-    function lvSellingOf(id) {
+    // Price Each default of a livestock item: read from the backend lookup (PLIVE), never from the screen table
+    function puPriceOf(id) {
+      var a = PLIVE[String(id)];
+      return a ? a.priceeach : '0';
+    }
+    function puPriceOf_old(id) {
       var v = '0';
       table.rows().every(function () {
         var d = this.data();
-        if (Number(d.livestockid) === Number(id)) { v = Number(d.sellingprice).toFixed(2); }
+        if (Number(d.livestockid) === Number(id)) { v = Number(d.priceeach).toFixed(2); }
       });
       return v;
     }
@@ -9028,7 +9147,7 @@ $n         = dt_n();
       livestockid:       ['#puLivestock',    '#puLivestockFb'],
       quantity:          ['#puQty',          '#puQtyFb'],
       purchasecost:      ['#puPurchaseCost', '#puPurchaseCostFb'],
-      sellingprice:      ['#puSellingPrice', '#puSellingPriceFb'],
+      priceeach:      ['#pupriceeach', '#pupriceeachFb'],
       paidamount:        ['#puPaid',         '#puPaidFb'],
       paidfromaccountid: ['#puAccount',      '#puAccountFb'],
       note:              ['#puNote',         '#puNoteFb']
@@ -9081,7 +9200,82 @@ $n         = dt_n();
     }
 
     /* ---------- Live recalculation ---------- */
+    function puSaveState() {
+      $('#btnSavePurchase').prop('disabled', puSaving || !puCalcOk || puBalanceBlocked);
+    }
+
+    function puCalcRequest() {
+      var seq = ++puCalcSeq;
+      $.ajax({
+        url: URL_SELF, type: 'POST', dataType: 'json',
+        data: { action: 'purchasecalc', csrf_token: CSRF, quantity: $.trim($('#puQty').val()), purchasecost: $.trim($('#puPurchaseCost').val()), paidamount: $.trim($('#puPaid').val()) || '0' }
+      }).done(function (res) {
+        if (seq !== puCalcSeq) { return; }
+        if (puCalcFlag) { puResetField(puCalcFlag); puCalcFlag = ''; }
+        if (res.success) {
+          puCalcOk = true; puCalcMsg = '';
+          $('#puCostEach').val(moneyS(res.data.costeach));
+          $('#puFootPurchaseCost').text(moneyS(res.data.purchasecost));
+          $('#puFootPaid').text(moneyS(res.data.paid));
+          $('#puFootBalance').text(moneyS(res.data.balance));
+        } else {
+          puCalcOk = false; puCalcMsg = res.message || '';
+          $('#puCostEach').val('');
+          if (res.field && PU_FIELDS[res.field]) {
+            $(PU_FIELDS[res.field][0]).addClass('is-invalid');
+            $(PU_FIELDS[res.field][1]).text(res.message);
+            puCalcFlag = res.field;
+          }
+        }
+        puSaveState();
+      }).fail(function () {
+        if (seq !== puCalcSeq) { return; }
+        puCalcOk = false; puCalcMsg = 'Cost each could not be calculated. Please try again.';
+        puSaveState();
+      });
+    }
+
     function puRecalc() {
+      var qty     = $.trim($('#puQty').val());
+      var cost    = $.trim($('#puPurchaseCost').val());
+      var paidRaw = $.trim($('#puPaid').val()) || '0';
+      var qOk     = RE_QTY.test(qty) && /[1-9]/.test(qty);
+      var a       = PLIVE[String($('#puLivestock').val() || '')];
+
+      $('#puLivestockHelp').text(a ? 'On hand: ' + fmtInt(a.currentstock) + ' animals' : '');
+      $('#puQtyHelp').text(a && qOk ? 'Stock after purchase: ' + fmtInt(a.currentstock + Number(qty)) + ' animals' : '');
+      var avail = puAvailableMinor();
+      $('#puAccountHelp').text(avail === null ? '' : 'Available balance: ' + minorMoney(avail));
+      var paidTyped = RE_PAID.test(paidRaw) && /[1-9]/.test(paidRaw);
+      $('#puAccountReq').prop('hidden', !paidTyped);
+      $('#puAccount').attr('aria-required', paidTyped ? 'true' : 'false');
+
+      var msg = RE_PAID.test(paidRaw) ? puBalanceMessage(toMinor(paidRaw, 2)) : '';
+      puBalanceBlocked = msg !== '';
+      if (msg) {
+        $('#puPaid').addClass('is-invalid');
+        $('#puPaidFb').text(msg);
+      } else if (puBalanceFlagged) {
+        $('#puPaid').removeClass('is-invalid');
+        $('#puPaidFb').text(PU_DEFAULTS.paidamount);
+      }
+      puBalanceFlagged = puBalanceBlocked;
+
+      // Cost Each, Purchase Cost and Balance due: only the server calculates them
+      puCalcOk = false;
+      $('#puCostEach').val('');
+      clearTimeout(puCalcTimer);
+      puCalcSeq++;
+      if (qty === '' || cost === '') {
+        $('#puFootPurchaseCost, #puFootPaid, #puFootBalance').text('-');
+        puSaveState();
+        return;
+      }
+      puSaveState();
+      puCalcTimer = setTimeout(puCalcRequest, 250);
+    }
+
+    function puRecalc_old1() {
       var qty   = $.trim($('#puQty').val());
       var cost  = $.trim($('#puPurchaseCost').val());
       var qOk   = RE_QTY.test(qty) && /[1-9]/.test(qty);
@@ -9176,12 +9370,12 @@ $n         = dt_n();
     });
     $('#puLivestock').on('change', function () {
       puResetField('livestockid'); puResetField('quantity');
-      if (!puSellingTouched && !puEditId) { $('#puSellingPrice').val($(this).val() ? lvSellingOf($(this).val()) : '0'); }
+      if (!puPriceTouched && !puEditId) { $('#pupriceeach').val($(this).val() ? puPriceOf($(this).val()) : '0'); }
       puRecalc();
     });
     $('#puQty').on('input', function () { puResetField('quantity'); puRecalc(); });
     $('#puPurchaseCost').on('input', function () { puResetField('purchasecost'); puRecalc(); });
-    $('#puSellingPrice').on('input', function () { puSellingTouched = true; puResetField('sellingprice'); });
+    $('#pupriceeach').on('input', function () { puPriceTouched = true; puResetField('priceeach'); });
     $('#puPaid').on('input', function () {
       $(this).removeClass('is-invalid');
       $('#puPaidFb').text(PU_DEFAULTS.paidamount);
@@ -9213,9 +9407,9 @@ $n         = dt_n();
       puFillSelects();
       puSaving = false;
       $('#puDate').val(ymd(new Date()));
-      $('#puPurchaseCost').val('0'); $('#puSellingPrice').val('0'); puSellingTouched = false;
+      $('#puPurchaseCost').val('0'); $('#pupriceeach').val('0'); puPriceTouched = false;
       $('#puPaid').val('0');
-      if (livestockId && PLIVE[String(livestockId)]) { $('#puLivestock').val(String(livestockId)); $('#puSellingPrice').val(lvSellingOf(livestockId)); }
+      if (livestockId && PLIVE[String(livestockId)]) { $('#puLivestock').val(String(livestockId)); $('#pupriceeach').val(puPriceOf(livestockId)); }
       puRecalc();
       $('#purchaseModal').modal('show');
     }
@@ -9264,14 +9458,14 @@ $n         = dt_n();
       var cost = $.trim($('#puPurchaseCost').val());
       if (!RE_PAID.test(cost)) { puMark('purchasecost', null); return false; }
       var costM = toMinor(cost, 2);
-      if (costEachMinor(costM, BigInt(qty)) > MAX_PRICE_MINOR) {
+      if (!puCalcOk) { puMark('purchasecost', puCalcMsg || 'Cost Each is still being calculated. Please wait.'); return false; } if (false) {
         puCostFlagged = true;
         puMark('purchasecost', 'Cost each is too large (maximum 9,999,999.99). Check the purchase cost and the quantity.');
         return false;
       }
 
-      var selling = $.trim($('#puSellingPrice').val());
-      if (!RE_PRICE.test(selling)) { puMark('sellingprice', null); return false; }
+      var priceEach = $.trim($('#pupriceeach').val());
+      if (!RE_PRICE.test(priceEach)) { puMark('priceeach', null); return false; }
 
       var paidRaw = $.trim($('#puPaid').val()) || '0';
       if (!RE_PAID.test(paidRaw)) { puMark('paidamount', null); return false; }
@@ -9305,7 +9499,7 @@ $n         = dt_n();
       }
 
       var price = $.trim($('#puPrice').val());
-      if (!RE_PRICE.test(price)) { puMark('sellingprice', null); return false; }
+      if (!RE_PRICE.test(price)) { puMark('priceeach', null); return false; }
 
       var total = BigInt(qty) * toMinor(price, 2);
       if (total > MAX_TOTAL) { puMark('quantity', 'The purchase total is too large.'); return false; }
@@ -9335,7 +9529,7 @@ $n         = dt_n();
         livestockid: $('#puLivestock').val(),
         quantity: $.trim($('#puQty').val()),
         purchasecost: $.trim($('#puPurchaseCost').val()),
-        sellingprice: $.trim($('#puSellingPrice').val()),
+        priceeach: $.trim($('#pupriceeach').val()),
         paidamount: $.trim($('#puPaid').val()) || '0',
         paidfromaccountid: $('#puAccount').val() || 0,
         note: $.trim($('#puNote').val())
@@ -9495,15 +9689,15 @@ $n         = dt_n();
     /* ---------- Livestock Add / Edit modal (replaces the old opener and the old submit handler) ---------- */
     var lvOpening = false;
     var LV_NAME_REQ = 'Name is required.', LV_TYPE_REQ = 'Type is required.', LV_STAGE_REQ = 'Stage is required.';
-    var LV_STOCK_MSG = $('#lStockFb').text(), LV_COST_MSG = $('#lCostEachFb').text(), LV_PRICE_MSG = $('#lSellingPriceFb').text();
+    var LV_STOCK_MSG = $('#lStockFb').text(), LV_COST_MSG = $('#lCostEachFb').text(), LV_PRICE_MSG = $('#lpriceeachFb').text();
 
     function clearInvalid() {
-      $('#lName, #lType, #lStock, #lCostEach, #lSellingPrice, #lStage').removeClass('is-invalid');
+      $('#lName, #lType, #lStock, #lCostEach, #lpriceeach, #lStage').removeClass('is-invalid');
       $('#lNameFb').text(LV_NAME_REQ);
       $('#lTypeFb').text(LV_TYPE_REQ);
       $('#lStockFb').text(LV_STOCK_MSG);
       $('#lCostEachFb').text(LV_COST_MSG);
-      $('#lSellingPriceFb').text(LV_PRICE_MSG);
+      $('#lpriceeachFb').text(LV_PRICE_MSG);
       $('#lStageFb').text(LV_STAGE_REQ);
     }
 
@@ -9519,8 +9713,8 @@ $n         = dt_n();
         lslFill('#lType', LSL.types, 'Select type', d ? d.type : '');
         lslFill('#lStage', LSL.stages, 'Select stage', d ? d.stage : 'Active');
         $('#lStock').val(d ? d.currentstock : 0);
-        $('#lCostEach').val(d ? Number(d.costeach).toFixed(2) : '0.00');
-        $('#lSellingPrice').val(d ? Number(d.sellingprice).toFixed(2) : '0.00');
+        $('#lCostEach').val(d ? d.costeach : '0.00');
+        $('#lPriceEach').val(d ? d.priceeach : '0.00');
         $('#livestockModalTitle').text(d ? 'Edit Livestock' : 'Add Livestock');
         $('#livestockModal').modal('show');
       }).always(function () { lvOpening = false; });
@@ -9536,13 +9730,13 @@ $n         = dt_n();
       var type   = $.trim($('#lType').val() || '');
       var stock  = $.trim($('#lStock').val());
       var cost   = $.trim($('#lCostEach').val());
-      var price  = $.trim($('#lSellingPrice').val());
+      var price  = $.trim($('#lpriceeach').val());
       var stage = $.trim($('#lStage').val() || '');
       if (name === '') { $('#lName').addClass('is-invalid').trigger('focus'); return; }
       if (type === '') { $('#lType').addClass('is-invalid').trigger('focus'); return; }
       if (!/^\d+$/.test(stock) || Number(stock) > CFG.maxStock) { $('#lStock').addClass('is-invalid').trigger('focus'); return; }
       if (!validMoney(cost)) { $('#lCostEach').addClass('is-invalid').trigger('focus'); return; }
-      if (!validMoney(price)) { $('#lSellingPrice').addClass('is-invalid').trigger('focus'); return; }
+      if (!validMoney(price)) { $('#lpriceeach').addClass('is-invalid').trigger('focus'); return; }
       if (stage === '') { $('#lStage').addClass('is-invalid').trigger('focus'); return; }
 
       var $btn = $('#btnSaveLivestock').prop('disabled', true);
@@ -9553,7 +9747,7 @@ $n         = dt_n();
         type: type,
         currentstock: stock,
         costeach: cost,
-        sellingprice: price,
+        priceeach: price,
         stage: stage
       }).done(function (res) {
         if (res.success) {
@@ -9563,7 +9757,7 @@ $n         = dt_n();
           return;
         }
         var map = { name: ['#lName', '#lNameFb'], type: ['#lType', '#lTypeFb'], currentstock: ['#lStock', '#lStockFb'],
-                    costeach: ['#lCostEach', '#lCostEachFb'], sellingprice: ['#lSellingPrice', '#lSellingPriceFb'], stage: ['#lStage', '#lStageFb'] };
+                    costeach: ['#lCostEach', '#lCostEachFb'], priceeach: ['#lpriceeach', '#lpriceeachFb'], stage: ['#lStage', '#lStageFb'] };
         if (map[res.field]) {
           $(map[res.field][1]).text(res.message);
           $(map[res.field][0]).addClass('is-invalid').trigger('focus');
@@ -9852,7 +10046,7 @@ $n         = dt_n();
     };
     var SA_DEFAULTS = {};
     $.each(SA_FIELDS, function (key, pair) { SA_DEFAULTS[key] = $(pair[1]).text(); });
-    var SA_LINE_KEYS = { livestock: '.sl-livestock', quantity: '.sl-qty', sellingprice: '.sl-selling' };
+    var SA_LINE_KEYS = { livestock: '.sl-livestock', quantity: '.sl-qty', priceeach: '.sl-price' };
 
     /* ---------- Walk-in customer (sale) ---------- */
     var WALKIN = <?= json_encode(BF_WALKIN_NAME, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -9911,10 +10105,10 @@ $n         = dt_n();
     }
     function saMarkLinesError(message) { $('#saLinesFb').text(message).prop('hidden', false); }
 
-    /* Server field key: a header field, "lines", or "lines:N:livestock|quantity|sellingprice". */
+    /* Server field key: a header field, "lines", or "lines:N:livestock|quantity|priceeach". */
     function saShowServerError(field, message) {
       if (field && SA_FIELDS[field]) { saMark(field, message); return; }
-      var m = /^lines:(\d+):(livestock|quantity|sellingprice)$/.exec(field || '');
+      var m = /^lines:(\d+):(livestock|quantity|priceeach)$/.exec(field || '');
       if (m && saMarkLine(parseInt(m[1], 10), m[2], message)) { return; }
       if (field === 'lines' || m) { saMarkLinesError(message); }
     }
@@ -9933,8 +10127,8 @@ $n         = dt_n();
           '<div class="invalid-feedback" id="slFb' + seq + '" data-default="Select a livestock item.">Select a livestock item.</div></td>' +
         '<td class="w-qty"><input type="number" class="form-control sl-qty" min="1" max="999999" step="1" inputmode="numeric" aria-describedby="slQtyFb' + seq + '">' +
           '<div class="invalid-feedback" id="slQtyFb' + seq + '" data-default="Quantity must be a whole number greater than 0.">Quantity must be a whole number greater than 0.</div></td>' +
-        '<td class="w-price"><input type="number" class="form-control sl-selling" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="slSellingPriceFb' + seq + '">' +
-          '<div class="invalid-feedback" id="slSellingPriceFb' + seq + '" data-default="Selling price must be 0 or more, with up to 2 decimals.">Selling price must be 0 or more, with up to 2 decimals.</div></td>' +
+        '<td class="w-price"><input type="number" class="form-control sl-price" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="slpriceeachFb' + seq + '">' +
+          '<div class="invalid-feedback" id="slpriceeachFb' + seq + '" data-default="Price Each must be 0 or more, with up to 2 decimals.">Price Each must be 0 or more, with up to 2 decimals.</div></td>' +
         '<td class="w-total ln-total-cell"><output class="sl-total">$0.00</output></td>' +
         '<td class="w-rm text-center"><button type="button" class="btn btn-danger act-btn btn-sl-remove" title="Remove line"><i class="fas fa-times" aria-hidden="true"></i></button></td>' +
         '</tr>';
@@ -9946,14 +10140,14 @@ $n         = dt_n();
         var n = i + 1, $tr = $(this);
         $tr.find('.sl-livestock').attr('aria-label', 'Livestock, line ' + n);
         $tr.find('.sl-qty').attr('aria-label', 'Quantity, line ' + n);
-        $tr.find('.sl-selling').attr('aria-label', 'Selling price, line ' + n);
+        $tr.find('.sl-price').attr('aria-label', 'Price Each, line ' + n);
         $tr.find('.sl-total').attr('aria-label', 'Line total, line ' + n);
         $tr.find('.btn-sl-remove').attr('aria-label', 'Remove line ' + n).prop('disabled', saLocked || $rows.length === 1);
       });
     }
 
     function saLineValues($tr) {
-      return { item: $tr.find('.sl-livestock').val() || '', qty: $.trim($tr.find('.sl-qty').val()), price: $.trim($tr.find('.sl-selling').val()) };
+      return { item: $tr.find('.sl-livestock').val() || '', qty: $.trim($tr.find('.sl-qty').val()), price: $.trim($tr.find('.sl-price').val()) };
     }
     function saQtyOk(v) { return RE_QTY.test(v.qty) && /[1-9]/.test(v.qty); }
     function saLineTotal(v) {
@@ -9961,11 +10155,11 @@ $n         = dt_n();
       return BigInt(v.qty) * toMinor(v.price, 2);
     }
 
-    // Selling price follows the selling price of the animal until the user types a price on that line
+    // Price Each follows the Price Each of the animal until the user types a price on that line
     function saApplyDefaultPrice($tr) {
       if ($tr.data('touched')) { return; }
       var a = SLIVE[String($tr.find('.sl-livestock').val() || '')];
-      $tr.find('.sl-selling').val(a ? a.sellingprice : '0');
+      $tr.find('.sl-price').val(a ? a.priceeach : '0');
     }
 
     function saUpdateLine($tr) {
@@ -10030,7 +10224,7 @@ $n         = dt_n();
       $tr.find('.sl-livestock').html(saItemOptions());
       if (livestockId && SLIVE[String(livestockId)]) { $tr.find('.sl-livestock').val(String(livestockId)); }
       if (qty !== undefined) { $tr.find('.sl-qty').val(qty); }
-      if (price !== undefined) { $tr.find('.sl-selling').val(price); $tr.data('touched', true); } else { saApplyDefaultPrice($tr); }
+      if (price !== undefined) { $tr.find('.sl-price').val(price); $tr.data('touched', true); } else { saApplyDefaultPrice($tr); }
       if (saLocked) { $tr.find('input, select, button').prop('disabled', true); }
       saRenumber();
       saUpdateLine($tr);
@@ -10048,12 +10242,12 @@ $n         = dt_n();
       saResetLine($(this));
       saResetLine($tr.find('.sl-qty'));
       saApplyDefaultPrice($tr);
-      saResetLine($tr.find('.sl-selling'));
+      saResetLine($tr.find('.sl-price'));
       saUpdateLine($tr);
       saRecalc();
     });
-    $('#saLinesBody').on('input', '.sl-selling', function () { $(this).closest('tr').data('touched', true); });
-    $('#saLinesBody').on('input', '.sl-qty, .sl-selling', function () {
+    $('#saLinesBody').on('input', '.sl-price', function () { $(this).closest('tr').data('touched', true); });
+    $('#saLinesBody').on('input', '.sl-qty, .sl-price', function () {
       saResetLine($(this));
       saUpdateLine($(this).closest('tr'));
       saRecalc();
@@ -10140,7 +10334,7 @@ $n         = dt_n();
         $('#saNote').val(wk.is ? wk.note : inv.note);
         $('#saPaid').val(inv.paid);
         $('#saAccount').val(SL.receivedinaccountid > 0 && SACC[String(SL.receivedinaccountid)] ? String(SL.receivedinaccountid) : '');
-        $.each(SL.lines, function (i, l) { saAddLine(l.livestockid, l.quantity, l.sellingprice); });
+        $.each(SL.lines, function (i, l) { saAddLine(l.livestockid, l.quantity, l.priceeach); });
 
         var msgs = [];
         if (saLocked) {
@@ -10194,7 +10388,7 @@ $n         = dt_n();
         var n = i + 1, v = saLineValues($(this));
         if (!v.item || !SLIVE[String(v.item)]) { saMarkLine(n, 'livestock', null); ok = false; return false; }
         if (!saQtyOk(v)) { saMarkLine(n, 'quantity', null); ok = false; return false; }
-        if (!RE_PRICE.test(v.price)) { saMarkLine(n, 'sellingprice', null); ok = false; return false; }
+        if (!RE_PRICE.test(v.price)) { saMarkLine(n, 'priceeach', null); ok = false; return false; }
         var t = saLineTotal(v);
         if (t > MAX_TOTAL) { saMarkLine(n, 'quantity', 'The line total is too large.'); ok = false; return false; }
         total += t;
@@ -10228,7 +10422,7 @@ $n         = dt_n();
       var lines = [];
       $('#saLinesBody tr.line-row').each(function () {
         var v = saLineValues($(this));
-        lines.push({ livestockid: v.item, quantity: v.qty, sellingprice: v.price });
+        lines.push({ livestockid: v.item, quantity: v.qty, priceeach: v.price });
       });
 
       var data = {
@@ -10374,11 +10568,11 @@ $n         = dt_n();
       $('#btnSaveSale').prop('disabled', saStockBlocked || saSaving);
     }
 
-    // Selling price follows the selling price of the animal until the user types a price
+    // Price Each follows the Price Each of the animal until the user types a price
     function saApplyDefaultPrice() {
       if (saPriceTouched) { return; }
       var a = SLIVE[String($('#saLivestock').val() || '')];
-      $('#saPrice').val(a ? a.sellingprice : '0');
+      $('#saPrice').val(a ? a.priceeach : '0');
     }
 
     $('#saCustomer, #saDate, #saRef, #saNote').on('input change', function () {
@@ -10471,7 +10665,7 @@ $n         = dt_n();
       if (stockMsg) { saStockFlagged = true; saMark('quantity', stockMsg); return false; }
 
       var price = $.trim($('#saPrice').val());
-      if (!RE_PRICE.test(price)) { saMark('sellingprice', null); return false; }
+      if (!RE_PRICE.test(price)) { saMark('priceeach', null); return false; }
 
       var total = BigInt(qty) * toMinor(price, 2);
       if (total > MAX_TOTAL) { saMark('quantity', 'The sale total is too large.'); return false; }
@@ -10548,7 +10742,7 @@ $n         = dt_n();
     };
     var QU_DEFAULTS = {};
     $.each(QU_FIELDS, function (key, pair) { QU_DEFAULTS[key] = $(pair[1]).text(); });
-    var QU_LINE_KEYS = { livestock: '.ql-livestock', quantity: '.ql-qty', sellingprice: '.ql-selling' };
+    var QU_LINE_KEYS = { livestock: '.ql-livestock', quantity: '.ql-qty', priceeach: '.ql-price' };
 
     /* ---------- Walk-in customer (quotation) ---------- */
     QU_FIELDS.walkinname   = ['#quWalkinName', '#quWalkinNameFb'];
@@ -10596,10 +10790,10 @@ $n         = dt_n();
       $('#quLinesFb').text(message).prop('hidden', false);
     }
 
-    /* Server field key: a header field, "lines", or "lines:N:livestock|quantity|sellingprice". */
+    /* Server field key: a header field, "lines", or "lines:N:livestock|quantity|priceeach". */
     function quShowServerError(field, message) {
       if (field && QU_FIELDS[field]) { quMark(field, message); return; }
-      var m = /^lines:(\d+):(livestock|quantity|sellingprice)$/.exec(field || '');
+      var m = /^lines:(\d+):(livestock|quantity|priceeach)$/.exec(field || '');
       if (m && quMarkLine(parseInt(m[1], 10), m[2], message)) { return; }
       if (field === 'lines' || m) { quMarkLinesError(message); }
     }
@@ -10619,8 +10813,8 @@ $n         = dt_n();
           '<div class="invalid-feedback" id="qlFb' + seq + '" data-default="Select a livestock item.">Select a livestock item.</div></td>' +
         '<td class="w-qty"><input type="number" class="form-control ql-qty" min="1" max="999999" step="1" inputmode="numeric" aria-describedby="qlQtyFb' + seq + '">' +
           '<div class="invalid-feedback" id="qlQtyFb' + seq + '" data-default="Quantity must be a whole number greater than 0.">Quantity must be a whole number greater than 0.</div></td>' +
-        '<td class="w-price"><input type="number" class="form-control ql-selling" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="qlSellingPriceFb' + seq + '">' +
-          '<div class="invalid-feedback" id="qlSellingPriceFb' + seq + '" data-default="Selling price must be 0 or more, with up to 2 decimals.">Selling price must be 0 or more, with up to 2 decimals.</div></td>' +
+        '<td class="w-price"><input type="number" class="form-control ql-price" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="qlpriceeachFb' + seq + '">' +
+          '<div class="invalid-feedback" id="qlpriceeachFb' + seq + '" data-default="Price Each must be 0 or more, with up to 2 decimals.">Price Each must be 0 or more, with up to 2 decimals.</div></td>' +
         '<td class="w-total ln-total-cell"><output class="ql-total">$0.00</output></td>' +
         '<td class="w-rm text-center"><button type="button" class="btn btn-danger act-btn btn-remove" title="Remove line"><i class="fas fa-times" aria-hidden="true"></i></button></td>' +
         '</tr>';
@@ -10632,7 +10826,7 @@ $n         = dt_n();
         var n = i + 1, $tr = $(this);
         $tr.find('.ql-livestock').attr('aria-label', 'Livestock, line ' + n);
         $tr.find('.ql-qty').attr('aria-label', 'Quantity, line ' + n);
-        $tr.find('.ql-selling').attr('aria-label', 'Selling price, line ' + n);
+        $tr.find('.ql-price').attr('aria-label', 'Price Each, line ' + n);
         $tr.find('.ql-total').attr('aria-label', 'Line total, line ' + n);
         $tr.find('.btn-remove').attr('aria-label', 'Remove line ' + n).prop('disabled', $rows.length === 1);
       });
@@ -10642,7 +10836,7 @@ $n         = dt_n();
       return {
         item:  $tr.find('.ql-livestock').val() || '',
         qty:   $.trim($tr.find('.ql-qty').val()),
-        price: $.trim($tr.find('.ql-selling').val())
+        price: $.trim($tr.find('.ql-price').val())
       };
     }
 
@@ -10653,11 +10847,11 @@ $n         = dt_n();
       return BigInt(v.qty) * toMinor(v.price, 2);
     }
 
-    // Selling price follows the selling price of the animal until the user types a price on that line
+    // Price Each follows the Price Each of the animal until the user types a price on that line
     function quApplyDefaultPrice($tr) {
       if ($tr.data('touched')) { return; }
       var a = QLIVE[String($tr.find('.ql-livestock').val() || '')];
-      $tr.find('.ql-selling').val(a ? a.sellingprice : '0');
+      $tr.find('.ql-price').val(a ? a.priceeach : '0');
     }
 
     function quUpdateLine($tr) {
@@ -10711,14 +10905,14 @@ $n         = dt_n();
       quResetLineControl($(this));
       quResetLineControl($tr.find('.ql-qty'));
       quApplyDefaultPrice($tr);
-      quResetLineControl($tr.find('.ql-selling'));
+      quResetLineControl($tr.find('.ql-price'));
       quUpdateLine($tr);
       quRecalc();
     });
-    $('#quLinesBody').on('input', '.ql-selling', function () {
+    $('#quLinesBody').on('input', '.ql-price', function () {
       $(this).closest('tr').data('touched', true);
     });
-    $('#quLinesBody').on('input', '.ql-qty, .ql-selling', function () {
+    $('#quLinesBody').on('input', '.ql-qty, .ql-price', function () {
       quResetLineControl($(this));
       quUpdateLine($(this).closest('tr'));
       quRecalc();
@@ -10802,7 +10996,7 @@ $n         = dt_n();
         var n = i + 1, v = quLineValues($(this));
         if (!v.item || !QLIVE[String(v.item)]) { quMarkLine(n, 'livestock', null); ok = false; return false; }
         if (!quQtyOk(v)) { quMarkLine(n, 'quantity', null); ok = false; return false; }
-        if (!RE_PRICE.test(v.price)) { quMarkLine(n, 'sellingprice', null); ok = false; return false; }
+        if (!RE_PRICE.test(v.price)) { quMarkLine(n, 'priceeach', null); ok = false; return false; }
         var t = quLineTotal(v);
         if (t > MAX_TOTAL) { quMarkLine(n, 'quantity', 'The line total is too large.'); ok = false; return false; }
         total += t;
@@ -10820,7 +11014,7 @@ $n         = dt_n();
       var lines = [];
       $('#quLinesBody tr.line-row').each(function () {
         var v = quLineValues($(this));
-        lines.push({ livestockid: v.item, quantity: v.qty, sellingprice: v.price });
+        lines.push({ livestockid: v.item, quantity: v.qty, priceeach: v.price });
       });
 
       quSaving = true;
@@ -11062,7 +11256,7 @@ $n         = dt_n();
           { data: 'name', render: function (d, type) { return type === 'display' ? esc(d) : d; } },
           { data: 'type', render: function (d, type) { return type === 'display' ? esc(d) : d; } },
           { data: 'quantity', className: 'text-right', render: function (d, type) { return type === 'display' ? fmtInt(d) : d; } },
-          { data: 'sellingprice', className: 'text-right', render: function (d) { return moneyS(d); } },
+          { data: 'priceeach', className: 'text-right', render: function (d) { return moneyS(d); } },
           { data: 'linetotal', className: 'text-right', render: function (d) { return moneyS(d); } }
         ],
         buttons: [
@@ -11123,7 +11317,7 @@ $n         = dt_n();
 
       if (!invDT) { initInvoiceTable(); }
       var rows = $.map(data.lines, function (l, i) {
-        return { n: i + 1, name: l.name, type: l.type, quantity: l.quantity, sellingprice: l.sellingprice, linetotal: l.linetotal };
+        return { n: i + 1, name: l.name, type: l.type, quantity: l.quantity, priceeach: l.priceeach, linetotal: l.linetotal };
       });
       invDT.clear().rows.add(rows).draw(false);
 
@@ -11275,14 +11469,14 @@ $n         = dt_n();
 
     function reLineHtml(l, n) {
       var max = Number(l.returnable);
-      return '<tr class="line-row" data-itemid="' + Number(l.invoiceitemid) + '" data-price="' + esc(l.sellingprice) + '" data-max="' + max + '">' +
+      return '<tr class="line-row" data-itemid="' + Number(l.invoiceitemid) + '" data-price="' + esc(l.priceeach) + '" data-max="' + max + '">' +
         '<td>' + esc(l.name + ' (' + l.type + ')') + '</td>' +
         '<td class="num-cell">' + fmtInt(l.quantity) + '</td>' +
         '<td class="num-cell">' + fmtInt(l.returnedqty) + '</td>' +
         '<td class="num-cell">' + fmtInt(max) + '</td>' +
         '<td class="w-qty"><input type="number" class="form-control re-qty" min="0" max="' + max + '" step="1" inputmode="numeric" value="0"' + (max <= 0 ? ' disabled' : '') + ' aria-describedby="reQtyFb' + n + '">' +
           '<div class="invalid-feedback" id="reQtyFb' + n + '" data-default="Quantity must be a whole number from 0 to ' + max + '.">Quantity must be a whole number from 0 to ' + max + '.</div></td>' +
-        '<td class="w-price num-cell">' + esc(moneyS(l.sellingprice)) + '</td>' +
+        '<td class="w-price num-cell">' + esc(moneyS(l.priceeach)) + '</td>' +
         '<td class="w-total ln-total-cell"><output class="re-total">$0.00</output></td>' +
         '</tr>';
     }
@@ -11598,7 +11792,7 @@ $n         = dt_n();
     // Lines table with the 5 export buttons; ctx = { title, top, bottom, file, printClass } (functions return text)
     function initDocLines(sel, btns, ctx) {
       var exp = { columns: ':visible' };
-      var priceKey = ctx.priceKey || 'sellingprice', totalKey = ctx.totalKey || 'linetotal';
+      var priceKey = ctx.priceKey || 'priceeach', totalKey = ctx.totalKey || 'linetotal';
       var dt = $(sel).DataTable({
         data: [], paging: false, searching: false, info: false, ordering: false, autoWidth: false,
         dom: 'Bt',
@@ -11642,7 +11836,7 @@ $n         = dt_n();
           { data: 'name', render: function (d, type) { return type === 'display' ? esc(d) : d; } },
           { data: 'type', render: function (d, type) { return type === 'display' ? esc(d) : d; } },
           { data: 'quantity', className: 'text-right', render: function (d, type) { return type === 'display' ? (/^\d+$/.test(String(d)) ? fmtInt(d) : esc(d)) : d; } },
-          { data: 'sellingprice', className: 'text-right', render: function (d) { return moneyS(d); } },
+          { data: 'priceeach', className: 'text-right', render: function (d) { return moneyS(d); } },
           { data: 'linetotal', className: 'text-right', render: function (d) { return moneyS(d); } }
         ],
         buttons: [
@@ -11732,9 +11926,9 @@ $n         = dt_n();
       $('#purchaseModalTitle').text('Purchase Livestock');
       $('#puPaid, #puAccount').prop('disabled', false);
       $('#puDate').val(ymd(new Date()));
-      $('#puPurchaseCost').val('0'); $('#puSellingPrice').val('0'); puSellingTouched = false;
+      $('#puPurchaseCost').val('0'); $('#pupriceeach').val('0'); puPriceTouched = false;
       $('#puPaid').val('0');
-      if (livestockId && PLIVE[String(livestockId)]) { $('#puLivestock').val(String(livestockId)); $('#puSellingPrice').val(lvSellingOf(livestockId)); }
+      if (livestockId && PLIVE[String(livestockId)]) { $('#puLivestock').val(String(livestockId)); $('#pupriceeach').val(puPriceOf(livestockId)); }
       puSupplierHelp();
       puRecalc();
       $('#purchaseModal').modal('show');
@@ -11763,14 +11957,14 @@ $n         = dt_n();
       var cost = $.trim($('#puPurchaseCost').val());
       if (!RE_PAID.test(cost)) { puMark('purchasecost', null); return false; }
       var costM = toMinor(cost, 2);
-      if (costEachMinor(costM, BigInt(qty)) > MAX_PRICE_MINOR) {
+      if (!puCalcOk) { puMark('purchasecost', puCalcMsg || 'Cost Each is still being calculated. Please wait.'); return false; } if (false) {
         puCostFlagged = true;
         puMark('purchasecost', 'Cost each is too large (maximum 9,999,999.99). Check the purchase cost and the quantity.');
         return false;
       }
 
-      var selling = $.trim($('#puSellingPrice').val());
-      if (!RE_PRICE.test(selling)) { puMark('sellingprice', null); return false; }
+      var priceEach = $.trim($('#pupriceeach').val());
+      if (!RE_PRICE.test(priceEach)) { puMark('priceeach', null); return false; }
 
       var paidRaw = $.trim($('#puPaid').val()) || '0';
       if (!RE_PAID.test(paidRaw)) { puMark('paidamount', null); return false; }
@@ -11804,7 +11998,7 @@ $n         = dt_n();
       }
 
       var price = $.trim($('#puPrice').val());
-      if (!RE_PRICE.test(price)) { puMark('sellingprice', null); return false; }
+      if (!RE_PRICE.test(price)) { puMark('priceeach', null); return false; }
 
       var total = BigInt(qty) * toMinor(price, 2);
       if (total > MAX_TOTAL) { puMark('quantity', 'The purchase total is too large.'); return false; }
@@ -11833,7 +12027,7 @@ $n         = dt_n();
         livestockid: $('#puLivestock').val(),
         quantity: $.trim($('#puQty').val()),
         purchasecost: $.trim($('#puPurchaseCost').val()),
-        sellingprice: $.trim($('#puSellingPrice').val()),
+        priceeach: $.trim($('#pupriceeach').val()),
         paidamount: $.trim($('#puPaid').val()) || '0',
         paidfromaccountid: $('#puAccount').val() || 0,
         note: $.trim($('#puNote').val())
@@ -11881,7 +12075,7 @@ $n         = dt_n();
         $('#puNote').val(p.note);
         $('#puLivestock').val(String(d.line.livestockid));
         $('#puQty').val(d.line.quantity);
-        $('#puPurchaseCost').val(d.line.purchasecost); $('#puSellingPrice').val(d.line.sellingprice); puSellingTouched = true;
+        $('#puPurchaseCost').val(d.line.purchasecost); $('#pupriceeach').val(d.line.priceeach); puPriceTouched = true;
         $('#puPaid').val(p.paid);
         $('#puAccount').val(p.accountid > 0 && PACC[String(p.accountid)] ? String(p.accountid) : '');
         $('#puPaid, #puAccount').prop('disabled', puManual);
@@ -11928,7 +12122,7 @@ $n         = dt_n();
           { data: 'reference', render: function (d, type) { return type === 'display' ? esc(d) : d; } },
           moneyCol('total'), moneyCol('paid'), moneyCol('balance'),
           {
-            data: 'stage',
+            data: 'status',
             render: function (d, type) { return type === 'display' ? '<span class="badge ' + statusCls(d) + '">' + esc(d) + '</span>' : d; }
           },
           { data: null, orderable: false, searchable: false, className: 'text-center text-nowrap', render: function (d, type, row) { return purchasesActions(row); } }
@@ -12033,7 +12227,7 @@ $n         = dt_n();
         });
       }
       var rows = $.map(data.lines, function (l, i) {
-        return { n: i + 1, name: l.name, type: l.type, quantity: l.quantity, sellingprice: l.sellingprice, linetotal: l.linetotal };
+        return { n: i + 1, name: l.name, type: l.type, quantity: l.quantity, priceeach: l.priceeach, linetotal: l.linetotal };
       });
       pvDT.clear().rows.add(rows).draw(false);
 
@@ -12192,10 +12386,10 @@ $n         = dt_n();
         { key: 'name', sel: '#qlvName', fb: '#qlvNameFb', req: 'Name is required.', max: 150, maxMsg: 'Name is too long (maximum 150 characters).' },
         { key: 'type', sel: '#qlvType', fb: '#qlvTypeFb', req: 'Select a valid type.' },
         { key: 'stage', sel: '#qlvStage', fb: '#qlvStageFb', req: 'Select a valid stage.', def: 'Active' },
-        /* cost each and selling price are not typed here: the purchase sets them */
+        /* cost each and Price Each are not typed here: the purchase sets them */
       ],
       done: function (row, res) {
-        PL.livestock = (PL.livestock || []).concat([{ livestockid: row.livestockid, name: row.name, type: row.type, currentstock: 0 }]).sort(byName);
+        PL.livestock = (PL.livestock || []).concat([{ livestockid: row.livestockid, name: row.name, type: row.type, currentstock: 0, costeach: row.costeach, priceeach: row.priceeach }]).sort(byName);
         puRebuildKeep();                       // re-indexes PLIVE
         $('#puLivestock').val(String(row.livestockid)).trigger('change');
         puRecalc();                            // helper lines: "On hand: 0 animals"
@@ -12302,7 +12496,7 @@ $n         = dt_n();
           var $tr = quAddLine(l.livestockid);
           if ($tr) {
             $tr.find('.ql-qty').val(l.quantity);
-            $tr.find('.ql-selling').val(l.sellingprice);
+            $tr.find('.ql-price').val(l.priceeach);
             $tr.data('touched', true);
             quUpdateLine($tr);
           }
@@ -12323,7 +12517,7 @@ $n         = dt_n();
       var lines = [];
       $('#quLinesBody tr.line-row').each(function () {
         var v = quLineValues($(this));
-        lines.push({ livestockid: v.item, quantity: v.qty, sellingprice: v.price });
+        lines.push({ livestockid: v.item, quantity: v.qty, priceeach: v.price });
       });
 
       var data = {
@@ -12466,7 +12660,7 @@ $n         = dt_n();
         });
       }
       var rows = $.map(data.lines, function (l, i) {
-        return { n: i + 1, name: l.name, type: l.type, quantity: l.quantity, sellingprice: l.sellingprice, linetotal: l.linetotal };
+        return { n: i + 1, name: l.name, type: l.type, quantity: l.quantity, priceeach: l.priceeach, linetotal: l.linetotal };
       });
       qvDT.clear().rows.add(rows).draw(false);
       $('#qvTotal').text(moneyS(q.total));
