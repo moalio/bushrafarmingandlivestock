@@ -124,6 +124,22 @@ function dt_cost_each(int $costMinor, int $qty): int
 
 const DT_QUOTATION_STATUSES = ['Draft', 'Sent', 'Accepted', 'Rejected', 'Expired'];
 
+/** Double entry: codes of the Chart of Accounts rows used by the journal (posted to the group code itself, no leaf needed). */
+const DT_ACC_LIVESTOCK   = '1200'; // Livestock inventory
+const DT_ACC_RECEIVABLE  = '1100'; // Accounts Receivable
+const DT_ACC_PAYABLE     = '2000'; // Accounts Payable
+const DT_ACC_REVENUE     = '4000'; // Sales Revenue
+const DT_ACC_COGS        = '5000'; // Cost of Goods Sold
+
+/** Account type each journal code must have in the Chart of Accounts. */
+const DT_JOURNAL_TYPES = [
+    DT_ACC_LIVESTOCK  => 'Assets',
+    DT_ACC_RECEIVABLE => 'Assets',
+    DT_ACC_PAYABLE    => 'Liability',
+    DT_ACC_REVENUE    => 'Revenue',
+    DT_ACC_COGS       => 'Expense',
+];
+
 const BF_WALKIN_NAME = 'Walk-in'; // name of the customers row used for unregistered customers
 const DT_MAX_WALKIN  = 100;       // maximum length of the optional walk-in name
 
@@ -1776,6 +1792,179 @@ function dt_log_purchase(PDO $pdo, string $action, string $text): void
         'INSERT INTO activitylogs (userid, action, description, activitydate) VALUES (NULL, :a, :d, NOW())',
         ['a' => $action, 'd' => mb_substr($text, 0, 255)]
     );
+}
+
+/* ---------- Double entry journal (journalentries + journallines) ---------- */
+
+/**
+ * Account id of a journal code (see DT_ACC_*). Groups are accepted (the journal posts to the group code itself).
+ *
+ * @param PDO    $pdo  Connection.
+ * @param string $code Account code.
+ *
+ * @return int Account id.
+ *
+ * @throws DtFail When the account is missing, OFF or of the wrong type (nothing is saved).
+ */
+function dt_journal_account(PDO $pdo, string $code): int
+{
+    $row = dt_q($pdo, 'SELECT accountid, accounttype, status FROM accounts WHERE code = :c LIMIT 1', ['c' => $code])->fetch();
+    if (!is_array($row) || strtoupper((string)$row['status']) !== 'ON') {
+        throw new DtFail('Accounting setup error: account code ' . $code . ' is missing or OFF in the Chart of Accounts. Nothing was saved.');
+    }
+    $want = DT_JOURNAL_TYPES[$code] ?? '';
+    if ($want !== '' && (string)$row['accounttype'] !== $want) {
+        throw new DtFail('Accounting setup error: account code ' . $code . ' must be of type ' . $want . '. Nothing was saved.');
+    }
+
+    return (int)$row['accountid'];
+}
+
+/**
+ * Post a balanced journal entry. Must run inside the transaction of the source record.
+ * Lines: ['account' => id, 'debit' => minor units, 'credit' => minor units, 'skip' => 0|1].
+ * skip = 1 marks a line whose cash effect is already counted by receipts, payments or salerefunds (no double counting in balances).
+ * Zero lines are dropped; an entry with no amounts is not saved (returns 0).
+ *
+ * @param PDO                     $pdo        Connection.
+ * @param string                  $sourceType purchase | sale | salereturn | salerefund.
+ * @param int                     $sourceId   Id of the source record.
+ * @param string                  $date       Entry date (Y-m-d).
+ * @param string                  $description Text.
+ * @param list<array<string,int>> $lines      Lines.
+ *
+ * @return int Journal entry id (0 when nothing to post).
+ *
+ * @throws DtFail When debit is not equal to credit or a line is invalid (the caller's transaction rolls back).
+ */
+function dt_journal_post(PDO $pdo, string $sourceType, int $sourceId, string $date, string $description, array $lines): int
+{
+    if (!$pdo->inTransaction()) {
+        throw new RuntimeException('dt_journal_post must run inside the transaction of the source record.');
+    }
+
+    $debit  = 0;
+    $credit = 0;
+    $clean  = [];
+    foreach ($lines as $l) {
+        $dr = (int)$l['debit'];
+        $cr = (int)$l['credit'];
+        if ($dr === 0 && $cr === 0) {
+            continue;
+        }
+        if ($dr < 0 || $cr < 0 || ($dr > 0 && $cr > 0) || (int)$l['account'] <= 0) {
+            throw new DtFail('Journal line is not valid. Nothing was saved.');
+        }
+        $debit  += $dr;
+        $credit += $cr;
+        $clean[] = ['account' => (int)$l['account'], 'debit' => $dr, 'credit' => $cr, 'skip' => (int)!empty($l['skip'])];
+    }
+    if ($clean === []) {
+        return 0;
+    }
+    if ($debit !== $credit) {
+        throw new DtFail('Journal is not balanced (debit ' . dt_format_minor($debit) . ', credit ' . dt_format_minor($credit) . '). Nothing was saved.');
+    }
+
+    try {
+        dt_q(
+            $pdo,
+            'INSERT INTO journalentries (entrydate, sourcetype, sourceid, description, totalamount) VALUES (:d, :t, :s, :x, :a)',
+            ['d' => $date, 't' => $sourceType, 's' => $sourceId, 'x' => mb_substr($description, 0, 255), 'a' => dt_minor_to_decimal($debit, 2)]
+        );
+        $entryId = (int)$pdo->lastInsertId();
+
+        $ins = $pdo->prepare('INSERT INTO journallines (journalentryid, accountid, debit, credit, skipbalance) VALUES (:j, :a, :dr, :cr, :sk)');
+        foreach ($clean as $l) {
+            $ins->execute([
+                'j'  => $entryId,
+                'a'  => $l['account'],
+                'dr' => dt_minor_to_decimal($l['debit'], 2),
+                'cr' => dt_minor_to_decimal($l['credit'], 2),
+                'sk' => $l['skip'],
+            ]);
+        }
+    } catch (PDOException $e) {
+        if (in_array($e->getCode(), ['42S02', '42S22'], true)) {
+            dt_log_error('[journal] ' . dt_describe_throwable($e));
+            throw new DtFail('The journal tables are missing. Run the journal SQL in phpMyAdmin first. Nothing was saved.');
+        }
+        throw $e;
+    }
+
+    return $entryId;
+}
+
+/**
+ * Journal lines of a purchase: Dr Livestock inventory (total); Cr paying account (paid, skip) and Cr Accounts Payable (balance due).
+ *
+ * @param PDO $pdo          Connection.
+ * @param int $total        Purchase total in minor units.
+ * @param int $paid         Paid amount in minor units.
+ * @param int $payAccountId Paying account (used only when paid > 0).
+ *
+ * @return list<array<string,int>> Lines.
+ *
+ * @throws DtFail When an accounting account is missing.
+ */
+function dt_journal_purchase_lines(PDO $pdo, int $total, int $paid, int $payAccountId): array
+{
+    $due = $total - $paid;
+    if ($due < 0) {
+        throw new DtFail('Paid amount cannot be more than the purchase cost.', false, 'paidamount');
+    }
+    $lines = [];
+    if ($total > 0) {
+        $lines[] = ['account' => dt_journal_account($pdo, DT_ACC_LIVESTOCK), 'debit' => $total, 'credit' => 0, 'skip' => 0];
+    }
+    if ($paid > 0) {
+        $lines[] = ['account' => $payAccountId, 'debit' => 0, 'credit' => $paid, 'skip' => 1];
+    }
+    if ($due > 0) {
+        $lines[] = ['account' => dt_journal_account($pdo, DT_ACC_PAYABLE), 'debit' => 0, 'credit' => $due, 'skip' => 0];
+    }
+
+    return $lines;
+}
+
+/**
+ * Journal lines of a sale: Dr receiving account (paid, skip), Dr Accounts Receivable (balance due), Dr COGS (cost);
+ * Cr Sales Revenue (total), Cr Livestock inventory (cost).
+ *
+ * @param PDO $pdo         Connection.
+ * @param int $total       Invoice total in minor units.
+ * @param int $paid        Paid amount in minor units.
+ * @param int $recvAccount Receiving account (used only when paid > 0).
+ * @param int $cost        Cost of the animals sold in minor units (quantity x cost each).
+ *
+ * @return list<array<string,int>> Lines.
+ *
+ * @throws DtFail When an accounting account is missing.
+ */
+function dt_journal_sale_lines(PDO $pdo, int $total, int $paid, int $recvAccount, int $cost): array
+{
+    $due = $total - $paid;
+    if ($due < 0) {
+        throw new DtFail('Paid amount cannot be more than the total.', false, 'paidamount');
+    }
+    $lines = [];
+    if ($paid > 0) {
+        $lines[] = ['account' => $recvAccount, 'debit' => $paid, 'credit' => 0, 'skip' => 1];
+    }
+    if ($due > 0) {
+        $lines[] = ['account' => dt_journal_account($pdo, DT_ACC_RECEIVABLE), 'debit' => $due, 'credit' => 0, 'skip' => 0];
+    }
+    if ($cost > 0) {
+        $lines[] = ['account' => dt_journal_account($pdo, DT_ACC_COGS), 'debit' => $cost, 'credit' => 0, 'skip' => 0];
+    }
+    if ($total > 0) {
+        $lines[] = ['account' => dt_journal_account($pdo, DT_ACC_REVENUE), 'debit' => 0, 'credit' => $total, 'skip' => 0];
+    }
+    if ($cost > 0) {
+        $lines[] = ['account' => dt_journal_account($pdo, DT_ACC_LIVESTOCK), 'debit' => 0, 'credit' => $cost, 'skip' => 0];
+    }
+
+    return $lines;
 }
 
 /* ---------- None supplier, purchase list rules, quotation list rules, customer position ---------- */
@@ -3680,6 +3869,16 @@ function dt_act_purchasesave(PDO $pdo): array
             dt_sync_payment($pdo, $purchaseId, $d['supplierid'], $d['accountid'], $d['paid'], $d['date']);
         }
 
+        /* g. Double entry (same transaction): Dr Livestock inventory, Cr paying account, Cr Accounts Payable. */
+        dt_journal_post(
+            $pdo,
+            'purchase',
+            $purchaseId,
+            $d['date'],
+            'Purchase #' . $purchaseId . ' ' . $supplier,
+            dt_journal_purchase_lines($pdo, $d['total'], $d['paid'], $d['accountid'])
+        );
+
         dt_log_purchase($pdo, 'Add', 'Purchase added: #' . $purchaseId . ' ' . $supplier);
 
         return ['success' => true, 'message' => 'Purchase #' . $purchaseId . ' saved.', 'purchaseid' => $purchaseId];
@@ -3910,6 +4109,20 @@ function dt_act_salesave(PDO $pdo): array
             dt_sync_receipt($pdo, $invoiceId, $d['customerid'], $d['accountid'], $d['paid'], $d['date']);
         }
 
+        /* f. Double entry (same transaction). Cost = quantity x the cost each already stored on the invoice lines. */
+        $costTotal = 0;
+        foreach ($d['lines'] as $l) {
+            $costTotal += $l['qty'] * dt_decimal_to_minor((string)$animals[$l['livestockid']]['costeach'], 2);
+        }
+        dt_journal_post(
+            $pdo,
+            'sale',
+            $invoiceId,
+            $d['date'],
+            'Sale #' . $invoiceId . ' ' . $customer,
+            dt_journal_sale_lines($pdo, $d['total'], $d['paid'], $d['accountid'], $costTotal)
+        );
+
         dt_log_sale($pdo, 'Add', 'Sale added: #' . $invoiceId . ' ' . $customer);
 
         return ['success' => true, 'message' => 'Sale #' . $invoiceId . ' saved.', 'invoiceid' => $invoiceId];
@@ -4001,6 +4214,20 @@ function dt_act_salesave_prev(PDO $pdo): array
         if ($d['paid'] > 0) {
             dt_sync_receipt($pdo, $invoiceId, $d['customerid'], $d['accountid'], $d['paid'], $d['date']);
         }
+
+        /* f. Double entry (same transaction). Cost = quantity x the cost each already stored on the invoice lines. */
+        $costTotal = 0;
+        foreach ($d['lines'] as $l) {
+            $costTotal += $l['qty'] * dt_decimal_to_minor((string)$animals[$l['livestockid']]['costeach'], 2);
+        }
+        dt_journal_post(
+            $pdo,
+            'sale',
+            $invoiceId,
+            $d['date'],
+            'Sale #' . $invoiceId . ' ' . $customer,
+            dt_journal_sale_lines($pdo, $d['total'], $d['paid'], $d['accountid'], $costTotal)
+        );
 
         dt_log_sale($pdo, 'Add', 'Sale added: #' . $invoiceId . ' ' . $customer);
 
