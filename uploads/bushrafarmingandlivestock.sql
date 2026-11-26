@@ -1,11 +1,11 @@
 -- phpMyAdmin SQL Dump
--- version 5.2.1
+-- version 5.2.3
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Nov 20, 2026 at 03:04 PM
--- Server version: 10.4.32-MariaDB
--- PHP Version: 8.2.12
+-- Generation Time: Nov 26, 2026 at 02:21 AM
+-- Server version: 10.11.19-MariaDB
+-- PHP Version: 8.5.13
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
@@ -44,7 +44,12 @@ INSERT INTO `accounts` (`accountid`, `parentaccountid`, `code`, `accountname`, `
 (3, NULL, '1', 'Cash On Hand', 'Assets', 'ON'),
 (4, 3, '1.1', 'Salam Bank', 'Assets', 'ON'),
 (5, NULL, '3.1', 'Utility Expenses', 'Expense', 'ON'),
-(6, 5, '3.1.1', 'Water Expenses', 'Expense', 'ON');
+(6, 5, '3.1.1', 'Water Expenses', 'Expense', 'ON'),
+(7, NULL, '2000', 'Accounts Payable', 'Liability', 'ON'),
+(8, NULL, '4000', 'Sales Revenue', 'Revenue', 'ON'),
+(9, NULL, '5000', 'Cost of Goods Sold', 'Expense', 'ON'),
+(10, NULL, '1100', 'Accounts Receivable', 'Assets', 'ON'),
+(11, NULL, '1200', 'Livestock', 'Assets', 'ON');
 
 -- --------------------------------------------------------
 
@@ -59,7 +64,7 @@ CREATE TABLE `accounttransfers` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Amount moved; always above 0 and never above the balance of the from account at that moment',
   `transferdate` date NOT NULL COMMENT 'Date the money was moved',
   `description` varchar(255) NOT NULL COMMENT 'Why the money was moved'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
 
@@ -159,7 +164,15 @@ INSERT INTO `activitylogs` (`activityid`, `userid`, `invoicenumber`, `action`, `
 (76, NULL, NULL, 'Add', 'Account added: 3.1.1 Water Expenses', '2026-11-20 15:26:41'),
 (77, NULL, NULL, 'Add', 'Employee added: ABDISALAM KHALIF', '2026-11-20 16:26:09'),
 (78, NULL, NULL, 'Add', 'Payroll bill added: 200.00 (1 employee) - NOV', '2026-11-20 16:57:35'),
-(79, NULL, NULL, 'Payment', 'Payroll payment added: 200.00 (1 employee) - NOV', '2026-11-20 16:57:51');
+(79, NULL, NULL, 'Payment', 'Payroll payment added: 200.00 (1 employee) - NOV', '2026-11-20 16:57:51'),
+(80, 1, NULL, 'Login', 'User signed in (IP ::1)', '2026-11-25 17:40:45'),
+(81, NULL, NULL, 'Add', 'Customer added: MOHAMED ALI ABDI', '2026-11-25 17:42:03'),
+(82, 1, NULL, 'Login', 'User signed in (IP ::1)', '2026-11-25 18:24:58'),
+(83, 1, NULL, 'Login', 'User signed in (IP ::1)', '2026-11-25 23:15:24'),
+(84, NULL, NULL, 'Add', 'Livestock added: Y3', '2026-11-26 02:32:25'),
+(85, 1, NULL, 'Login', 'User signed in (IP ::1)', '2026-11-26 03:10:43'),
+(86, NULL, NULL, 'Add', 'Livestock added: Z3', '2026-11-26 03:21:24'),
+(87, NULL, NULL, 'Add', 'Livestock added: Z3', '2026-11-26 03:41:55');
 
 -- --------------------------------------------------------
 
@@ -174,7 +187,7 @@ CREATE TABLE `assetadjustments` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Value taken off the asset; always above 0; the sum of the adjustments of an asset never goes above the amount of the asset',
   `adjustmentdate` date NOT NULL COMMENT 'Date of the adjustment',
   `description` varchar(255) NOT NULL COMMENT 'Why the value was lowered'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
 
@@ -188,7 +201,29 @@ CREATE TABLE `assets` (
   `assettype` enum('Equipment','Supply') NOT NULL COMMENT 'Equipment (tractors, tools, vehicles) is lowered by Depreciation; Supply (feed, medicine, materials in stock) is lowered by Supply Adjustment',
   `amount` decimal(11,2) NOT NULL COMMENT 'Value of the asset when it was registered; always above 0; the remaining value is this amount minus the sum of its adjustments and is never stored',
   `assetdate` date NOT NULL COMMENT 'Date the asset was acquired'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `companyprofile`
+--
+
+CREATE TABLE `companyprofile` (
+  `companyprofileid` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Always 1: the farm has one company profile row',
+  `companyname` varchar(150) NOT NULL COMMENT 'Company name; shown on printed reports and pages',
+  `phone` varchar(50) DEFAULT NULL COMMENT 'Company phone number; empty when unknown',
+  `email` varchar(150) DEFAULT NULL COMMENT 'Company email address; empty when unknown',
+  `address` varchar(255) DEFAULT NULL COMMENT 'Company address; empty when unknown',
+  `logofile` varchar(255) DEFAULT NULL COMMENT 'Path of the logo image saved in uploads/company/, relative to the site root; empty when no logo'
 ) ;
+
+--
+-- Dumping data for table `companyprofile`
+--
+
+INSERT INTO `companyprofile` (`companyprofileid`, `companyname`, `phone`, `email`, `address`, `logofile`) VALUES
+(1, 'Bushra Farming and Livestock', NULL, NULL, NULL, NULL);
 
 -- --------------------------------------------------------
 
@@ -203,7 +238,7 @@ CREATE TABLE `customerdepositrefunds` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Amount of deposit given back in cash; always above 0',
   `refunddate` date NOT NULL COMMENT 'Date the deposit was given back',
   `note` varchar(255) DEFAULT NULL COMMENT 'Optional note about the refund'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `customerdepositrefunds`
@@ -225,7 +260,7 @@ CREATE TABLE `customerdeposits` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Amount the customer paid in advance; always above 0',
   `depositdate` date NOT NULL COMMENT 'Date the customer paid the deposit',
   `note` varchar(255) DEFAULT NULL COMMENT 'Optional note about the deposit'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `customerdeposits`
@@ -247,7 +282,7 @@ CREATE TABLE `customerdepositusages` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Deposit amount used on the invoice; always above 0',
   `usagedate` date NOT NULL COMMENT 'Date the deposit was used',
   `note` varchar(255) DEFAULT NULL COMMENT 'Optional note about the usage'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
 
@@ -269,7 +304,8 @@ CREATE TABLE `customers` (
 INSERT INTO `customers` (`customerid`, `name`, `primarycontact`, `address`) VALUES
 (1, 'MOHAMED ALI ABDI', '610701116', 'MOGADISHU'),
 (2, 'Walk-in', NULL, NULL),
-(3, 'ABDISALAM KHALIF', '615963760', 'DAYNIILE');
+(3, 'ABDISALAM KHALIF', '615963760', 'DAYNIILE'),
+(4, 'MOHAMED ALI ABDI', '619909020', 'HOLLAND');
 
 -- --------------------------------------------------------
 
@@ -311,7 +347,7 @@ CREATE TABLE `equity` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Amount of the movement; always above 0',
   `equitydate` date NOT NULL COMMENT 'Date the money was put in or taken out',
   `description` varchar(255) DEFAULT NULL COMMENT 'Optional note about the movement; empty when none'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
 
@@ -327,7 +363,7 @@ CREATE TABLE `expenses` (
   `description` varchar(255) NOT NULL COMMENT 'Why the money was spent',
   `amount` decimal(11,2) NOT NULL COMMENT 'Amount spent; always above 0',
   `expensedate` date NOT NULL COMMENT 'Date the money was spent'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- --------------------------------------------------------
 
@@ -344,6 +380,7 @@ CREATE TABLE `invoiceitems` (
   `quantity` int(10) UNSIGNED NOT NULL COMMENT 'Animals for livestock, sales units for products; whole number greater than 0; exactly what this line took out of current stock, so edit and delete can put it back',
   `priceeach` decimal(9,2) NOT NULL COMMENT 'Price each: price of one animal or one sales unit; 0 or more',
   `costeach` decimal(9,2) NOT NULL DEFAULT 0.00 COMMENT 'Cost each snapshot: cost of one animal or sales unit when the line was saved (for livestock a copy of livestock.costeach), used for profit reports',
+  `inventoryaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Inventory account credited with the cost of this line',
   `linetotal` decimal(11,2) NOT NULL COMMENT 'Quantity times selling price; calculated by the server'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Invoice lines of Bushra Farming and Livestock';
 
@@ -351,14 +388,14 @@ CREATE TABLE `invoiceitems` (
 -- Dumping data for table `invoiceitems`
 --
 
-INSERT INTO `invoiceitems` (`invoiceitemid`, `invoiceid`, `itemtype`, `livestockid`, `productid`, `quantity`, `priceeach`, `costeach`, `linetotal`) VALUES
-(2, 1, 'Livestock', 1, NULL, 50, 4.00, 0.00, 200.00),
-(6, 5, 'Livestock', 2, NULL, 1, 90.00, 0.00, 90.00),
-(8, 4, 'Livestock', 1, NULL, 2, 90.00, 29.00, 180.00),
-(9, 6, 'Livestock', 3, NULL, 1, 90.00, 0.00, 90.00),
-(10, 9, 'Livestock', 2, NULL, 2, 100.00, 0.00, 200.00),
-(11, 10, 'Livestock', 1, NULL, 7, 90.00, 29.00, 630.00),
-(12, 11, 'Livestock', 1, NULL, 40, 90.00, 29.00, 3600.00);
+INSERT INTO `invoiceitems` (`invoiceitemid`, `invoiceid`, `itemtype`, `livestockid`, `productid`, `quantity`, `priceeach`, `costeach`, `inventoryaccountid`, `linetotal`) VALUES
+(2, 1, 'Livestock', 1, NULL, 50, 4.00, 0.00, 11, 200.00),
+(6, 5, 'Livestock', 2, NULL, 1, 90.00, 0.00, 11, 90.00),
+(8, 4, 'Livestock', 1, NULL, 2, 90.00, 29.00, 11, 180.00),
+(9, 6, 'Livestock', 3, NULL, 1, 90.00, 0.00, 11, 90.00),
+(10, 9, 'Livestock', 2, NULL, 2, 100.00, 0.00, 11, 200.00),
+(11, 10, 'Livestock', 1, NULL, 7, 90.00, 29.00, 11, 630.00),
+(12, 11, 'Livestock', 1, NULL, 40, 90.00, 29.00, 11, 3600.00);
 
 --
 -- Triggers `invoiceitems`
@@ -396,21 +433,24 @@ CREATE TABLE `invoices` (
   `totalamount` decimal(11,2) NOT NULL DEFAULT 0.00 COMMENT 'Total of the invoice; sum of the line totals, calculated by the server',
   `paidamount` decimal(11,2) NOT NULL DEFAULT 0.00 COMMENT 'Money received with the invoice; never above the total amount',
   `receivedinaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Asset account the money was received into (Receipt to); links to accounts.accountid, required when the paid amount is above 0',
+  `revenueaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Revenue account credited with the total',
+  `receivableaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Asset account debited with the unpaid part',
+  `cogsaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Expense account debited with the cost of the animals sold',
   `note` varchar(255) DEFAULT NULL COMMENT 'Free note about the invoice; empty when none'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `invoices`
 --
 
-INSERT INTO `invoices` (`invoiceid`, `customerid`, `invoicedate`, `reference`, `totalamount`, `paidamount`, `receivedinaccountid`, `note`) VALUES
-(1, 1, '2026-11-17', '610508800', 200.00, 200.00, 4, NULL),
-(4, 1, '2026-11-18', NULL, 180.00, 150.00, 4, NULL),
-(5, 2, '2026-11-19', NULL, 90.00, 90.00, 4, NULL),
-(6, 1, '2026-11-19', NULL, 90.00, 0.00, NULL, NULL),
-(9, 3, '2026-11-20', '677', 200.00, 0.00, NULL, NULL),
-(10, 3, '2026-11-20', NULL, 630.00, 0.00, NULL, NULL),
-(11, 3, '2026-11-20', NULL, 3600.00, 3600.00, 4, NULL);
+INSERT INTO `invoices` (`invoiceid`, `customerid`, `invoicedate`, `reference`, `totalamount`, `paidamount`, `receivedinaccountid`, `revenueaccountid`, `receivableaccountid`, `cogsaccountid`, `note`) VALUES
+(1, 1, '2026-11-17', '610508800', 200.00, 200.00, 4, 8, NULL, 9, NULL),
+(4, 1, '2026-11-18', NULL, 180.00, 150.00, 4, 8, 10, 9, NULL),
+(5, 2, '2026-11-19', NULL, 90.00, 90.00, 4, 8, NULL, 9, NULL),
+(6, 1, '2026-11-19', NULL, 90.00, 0.00, NULL, 8, 10, 9, NULL),
+(9, 3, '2026-11-20', '677', 200.00, 0.00, NULL, 8, 10, 9, NULL),
+(10, 3, '2026-11-20', NULL, 630.00, 0.00, NULL, 8, 10, 9, NULL),
+(11, 3, '2026-11-20', NULL, 3600.00, 3600.00, 4, 8, NULL, 9, NULL);
 
 --
 -- Triggers `invoices`
@@ -431,6 +471,36 @@ CREATE TRIGGER `trginvoicesbu` BEFORE UPDATE ON `invoices` FOR EACH ROW BEGIN
 END
 $$
 DELIMITER ;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `journalentries`
+--
+
+CREATE TABLE `journalentries` (
+  `journalentryid` int(10) UNSIGNED NOT NULL,
+  `entrydate` date NOT NULL,
+  `sourcetype` varchar(20) NOT NULL COMMENT 'purchase | sale | salereturn | salerefund',
+  `sourceid` int(10) UNSIGNED NOT NULL,
+  `description` varchar(255) NOT NULL,
+  `totalamount` decimal(11,2) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `journallines`
+--
+
+CREATE TABLE `journallines` (
+  `journallineid` int(10) UNSIGNED NOT NULL,
+  `journalentryid` int(10) UNSIGNED NOT NULL,
+  `accountid` int(10) UNSIGNED NOT NULL,
+  `debit` decimal(11,2) NOT NULL DEFAULT 0.00,
+  `credit` decimal(11,2) NOT NULL DEFAULT 0.00,
+  `skipbalance` tinyint(1) NOT NULL DEFAULT 0 COMMENT '1 = cash already counted by receipts/payments/refunds'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- --------------------------------------------------------
 
@@ -456,7 +526,10 @@ INSERT INTO `livestock` (`livestockid`, `name`, `type`, `currentstock`, `costeac
 (1, 'A9', 'GEEL', 6, 29.00, 90.00, 'DIYAAR U AH IN LA GADO'),
 (2, 'F12', 'WAN', 59, 0.00, 0.00, 'Nafaqayn ah'),
 (3, 'D2', 'Dibi', 34, 17.65, 0.00, 'Dashtay'),
-(4, 'Lo', 'LO', 40, 12.50, 30.00, 'iibin');
+(4, 'Lo', 'LO', 40, 12.50, 30.00, 'iibin'),
+(5, 'Y3', 'GEEL', 0, 0.00, 0.00, 'Nafaqayn ah'),
+(6, 'Z3', 'GEEL', 0, 0.00, 0.00, 'Nafaqayn ah'),
+(7, 'Z3', 'WAN', 0, 0.00, 0.00, 'Nafaqayn ah');
 
 -- --------------------------------------------------------
 
@@ -514,7 +587,7 @@ CREATE TABLE `payments` (
   `amount` decimal(11,2) NOT NULL COMMENT 'Amount paid to the supplier; always above 0',
   `paymentdate` date NOT NULL COMMENT 'Date the money was paid to the supplier',
   `note` varchar(255) DEFAULT NULL COMMENT 'Optional note about the payment; empty when none'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `payments`
@@ -688,21 +761,22 @@ CREATE TABLE `purchaseitems` (
   `costeach` decimal(9,2) NOT NULL COMMENT 'Cost each: cost of one purchase unit (one animal for livestock) = purchase cost divided by quantity, rounded half up to 2 decimals; calculated by the server',
   `priceeach` decimal(9,2) NOT NULL DEFAULT 0.00 COMMENT 'Price each: price of one animal typed in this purchase; 0.00 for old rows and product lines',
   `purchasecost` decimal(11,2) NOT NULL COMMENT 'Purchase cost: total paid for the whole line (all animals or units); 0 or more; checked by the server',
-  `stockadded` int(10) UNSIGNED NOT NULL COMMENT 'Sales units or animals this line added to current stock; kept so edit and delete can reverse exactly that amount'
-) ;
+  `stockadded` int(10) UNSIGNED NOT NULL COMMENT 'Sales units or animals this line added to current stock; kept so edit and delete can reverse exactly that amount',
+  `debitaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Inventory account debited by this line; links to accounts.accountid'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `purchaseitems`
 --
 
-INSERT INTO `purchaseitems` (`purchaseitemid`, `purchaseid`, `itemtype`, `livestockid`, `productid`, `quantity`, `costeach`, `priceeach`, `purchasecost`, `stockadded`) VALUES
-(2, 1, 'Livestock', 1, NULL, 60.0000, 30.00, 0.00, 1800.00, 60),
-(3, 2, 'Product', NULL, 1, 5.0000, 9.00, 0.00, 45.00, 5),
-(4, 3, 'Livestock', 2, NULL, 59.0000, 90.00, 0.00, 5310.00, 59),
-(5, 4, 'Product', NULL, 1, 10.0000, 23.00, 0.00, 230.00, 10),
-(6, 5, 'Livestock', 1, NULL, 4.0000, 20.00, 0.00, 80.00, 4),
-(7, 6, 'Livestock', 4, NULL, 40.0000, 12.50, 30.00, 500.00, 40),
-(8, 7, 'Livestock', 3, NULL, 34.0000, 17.65, 0.00, 600.00, 34);
+INSERT INTO `purchaseitems` (`purchaseitemid`, `purchaseid`, `itemtype`, `livestockid`, `productid`, `quantity`, `costeach`, `priceeach`, `purchasecost`, `stockadded`, `debitaccountid`) VALUES
+(2, 1, 'Livestock', 1, NULL, 60.0000, 30.00, 0.00, 1800.00, 60, 11),
+(3, 2, 'Product', NULL, 1, 5.0000, 9.00, 0.00, 45.00, 5, NULL),
+(4, 3, 'Livestock', 2, NULL, 59.0000, 90.00, 0.00, 5310.00, 59, 11),
+(5, 4, 'Product', NULL, 1, 10.0000, 23.00, 0.00, 230.00, 10, NULL),
+(6, 5, 'Livestock', 1, NULL, 4.0000, 20.00, 0.00, 80.00, 4, 11),
+(7, 6, 'Livestock', 4, NULL, 40.0000, 12.50, 30.00, 500.00, 40, 11),
+(8, 7, 'Livestock', 3, NULL, 34.0000, 17.65, 0.00, 600.00, 34, 11);
 
 --
 -- Triggers `purchaseitems`
@@ -769,21 +843,22 @@ CREATE TABLE `purchases` (
   `totalamount` decimal(11,2) NOT NULL DEFAULT 0.00 COMMENT 'Total of the purchase; sum of the line totals, calculated by the server',
   `paidamount` decimal(11,2) NOT NULL DEFAULT 0.00 COMMENT 'Amount paid at purchase time; never above the total amount',
   `paidfromaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Asset account the payment came from; links to accounts.accountid, required when the paid amount is above 0',
+  `payableaccountid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Liability account credited with the unpaid part; links to accounts.accountid',
   `note` varchar(255) DEFAULT NULL COMMENT 'Free note about the purchase; empty when none'
-) ;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `purchases`
 --
 
-INSERT INTO `purchases` (`purchaseid`, `supplierid`, `purchasedate`, `reference`, `totalamount`, `paidamount`, `paidfromaccountid`, `note`) VALUES
-(1, 1, '2026-11-17', NULL, 1800.00, 1800.00, 4, NULL),
-(2, 1, '2026-11-17', NULL, 45.00, 0.00, NULL, NULL),
-(3, 1, '2026-11-17', 'A3245', 5310.00, 0.00, NULL, 'Haloo Boobsiyo Lacagtooda'),
-(4, 1, '2026-11-17', '33', 230.00, 0.00, NULL, NULL),
-(5, 1, '2026-11-19', '33', 80.00, 75.00, 4, NULL),
-(6, 1, '2026-11-19', '610508800', 500.00, 300.00, 4, NULL),
-(7, 2, '2026-11-20', NULL, 600.00, 400.00, 4, NULL);
+INSERT INTO `purchases` (`purchaseid`, `supplierid`, `purchasedate`, `reference`, `totalamount`, `paidamount`, `paidfromaccountid`, `payableaccountid`, `note`) VALUES
+(1, 1, '2026-11-17', NULL, 1800.00, 1800.00, 4, NULL, NULL),
+(2, 1, '2026-11-17', NULL, 45.00, 0.00, NULL, 7, NULL),
+(3, 1, '2026-11-17', 'A3245', 5310.00, 0.00, NULL, 7, 'Haloo Boobsiyo Lacagtooda'),
+(4, 1, '2026-11-17', '33', 230.00, 0.00, NULL, 7, NULL),
+(5, 1, '2026-11-19', '33', 80.00, 75.00, 4, 7, NULL),
+(6, 1, '2026-11-19', '610508800', 500.00, 300.00, 4, 7, NULL),
+(7, 2, '2026-11-20', NULL, 600.00, 400.00, 4, 7, NULL);
 
 --
 -- Triggers `purchases`
@@ -951,6 +1026,38 @@ INSERT INTO `salereturns` (`returnid`, `invoiceid`, `customerid`, `returndate`, 
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `sentsms`
+--
+
+CREATE TABLE `sentsms` (
+  `smsid` int(10) UNSIGNED NOT NULL COMMENT 'Unique SMS batch number',
+  `message` varchar(600) NOT NULL COMMENT 'Text sent to every recipient of the batch',
+  `provider` varchar(20) NOT NULL COMMENT 'Provider used for the batch (Hormuud)',
+  `recipientcount` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Recipients of the batch (valid and invalid phones)',
+  `successcount` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Messages the provider accepted',
+  `failedcount` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Messages that failed (provider error or invalid phone)',
+  `userid` int(10) UNSIGNED DEFAULT NULL COMMENT 'User who sent the batch; links to users.userid; empty when unknown (no login yet)',
+  `sentat` datetime NOT NULL COMMENT 'When the batch was sent'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Sent SMS batches of Bushra Farming and Livestock (audit trail)';
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `sentsmsrecipients`
+--
+
+CREATE TABLE `sentsmsrecipients` (
+  `recipientid` int(10) UNSIGNED NOT NULL COMMENT 'Unique recipient row number',
+  `smsid` int(10) UNSIGNED NOT NULL COMMENT 'Batch this row belongs to; links to sentsms.smsid',
+  `customerid` int(10) UNSIGNED DEFAULT NULL COMMENT 'Customer the message was meant for; links to customers.customerid; empty when the customer was deleted',
+  `phone` varchar(30) NOT NULL COMMENT 'Phone number as used for the send (normalised)',
+  `status` enum('Sent','Failed') NOT NULL COMMENT 'Result for this phone',
+  `errornote` varchar(255) DEFAULT NULL COMMENT 'Short reason when the status is Failed; never holds a secret'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Recipients of the sent SMS batches of Bushra Farming and Livestock';
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `shareholders`
 --
 
@@ -984,6 +1091,18 @@ CREATE TABLE `shareholdershares` (
   `groupname` varchar(150) DEFAULT NULL COMMENT 'Name of the group of people sharing this percentage; empty when the row belongs to one shareholder; a group name is used once',
   `sharepercent` decimal(5,2) NOT NULL COMMENT 'Percentage of the business owned, from 0.01 to 100.00; the sum of all rows never goes above 100.00',
   `note` varchar(255) DEFAULT NULL COMMENT 'Optional note, for example who is in the group; empty when none'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `smsgateway`
+--
+
+CREATE TABLE `smsgateway` (
+  `smsgatewayid` tinyint(3) UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Always 1: the farm has one SMS gateway row',
+  `username` varchar(150) NOT NULL COMMENT 'Hormuud username',
+  `password` varchar(600) NOT NULL COMMENT 'Hormuud password, encrypted (AES-256-GCM, base64); never shown'
 ) ;
 
 -- --------------------------------------------------------
@@ -1026,7 +1145,18 @@ CREATE TABLE `users` (
 --
 
 INSERT INTO `users` (`userid`, `name`, `username`, `password`, `status`) VALUES
-(1, 'Abdisalam Khalif', 'Abdisalam', '$2y$10$FVAsQVPuVb1Z.M1fAb4UbOiwfZm2o.KHOXe18rIql5c6b0T6qb2lG', 'ON');
+(1, 'Abdisalam Khalif', 'Abdisalam', '$2y$12$DLzVCCpGEwXwtNyXZAwhf.EBmKSlCqITrhTK3bPTqkXeRgtU.h38i', 'ON');
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `vat`
+--
+
+CREATE TABLE `vat` (
+  `vatid` int(10) UNSIGNED NOT NULL COMMENT 'Unique VAT rate number',
+  `vatrate` decimal(5,2) NOT NULL COMMENT 'VAT percentage, from 0.00 to 100.00; each rate exists once'
+) ;
 
 --
 -- Indexes for dumped tables
@@ -1074,6 +1204,12 @@ ALTER TABLE `assets`
   ADD KEY `idxassetsname` (`name`),
   ADD KEY `idxassetsassettype` (`assettype`),
   ADD KEY `idxassetsassetdate` (`assetdate`);
+
+--
+-- Indexes for table `companyprofile`
+--
+ALTER TABLE `companyprofile`
+  ADD PRIMARY KEY (`companyprofileid`);
 
 --
 -- Indexes for table `customerdepositrefunds`
@@ -1141,7 +1277,8 @@ ALTER TABLE `invoiceitems`
   ADD PRIMARY KEY (`invoiceitemid`),
   ADD KEY `idxinvoiceitemsinvoiceid` (`invoiceid`),
   ADD KEY `idxinvoiceitemslivestockid` (`livestockid`),
-  ADD KEY `idxinvoiceitemsproductid` (`productid`);
+  ADD KEY `idxinvoiceitemsproductid` (`productid`),
+  ADD KEY `idxinvoiceitemsinventoryaccount` (`inventoryaccountid`);
 
 --
 -- Indexes for table `invoices`
@@ -1150,14 +1287,34 @@ ALTER TABLE `invoices`
   ADD PRIMARY KEY (`invoiceid`),
   ADD KEY `idxinvoicescustomerid` (`customerid`),
   ADD KEY `idxinvoicesinvoicedate` (`invoicedate`),
-  ADD KEY `idxinvoicesreceivedinaccountid` (`receivedinaccountid`);
+  ADD KEY `idxinvoicesreceivedinaccountid` (`receivedinaccountid`),
+  ADD KEY `idxinvoicesrevenueaccount` (`revenueaccountid`),
+  ADD KEY `idxinvoicesreceivableaccount` (`receivableaccountid`),
+  ADD KEY `idxinvoicescogsaccount` (`cogsaccountid`);
+
+--
+-- Indexes for table `journalentries`
+--
+ALTER TABLE `journalentries`
+  ADD PRIMARY KEY (`journalentryid`),
+  ADD KEY `idxjournalentriessource` (`sourcetype`,`sourceid`),
+  ADD KEY `idxjournalentriesdate` (`entrydate`);
+
+--
+-- Indexes for table `journallines`
+--
+ALTER TABLE `journallines`
+  ADD PRIMARY KEY (`journallineid`),
+  ADD KEY `idxjournallinesentry` (`journalentryid`),
+  ADD KEY `idxjournallinesaccount` (`accountid`);
 
 --
 -- Indexes for table `livestock`
 --
 ALTER TABLE `livestock`
   ADD PRIMARY KEY (`livestockid`),
-  ADD UNIQUE KEY `uqlivestockname` (`name`);
+  ADD UNIQUE KEY `uqlivestocknametypestage` (`name`,`type`,`stage`),
+  ADD KEY `idxlivestockname` (`name`);
 
 --
 -- Indexes for table `livestockstages`
@@ -1227,7 +1384,8 @@ ALTER TABLE `purchaseitems`
   ADD PRIMARY KEY (`purchaseitemid`),
   ADD KEY `idxpurchaseitemspurchaseid` (`purchaseid`),
   ADD KEY `idxpurchaseitemslivestockid` (`livestockid`),
-  ADD KEY `idxpurchaseitemsproductid` (`productid`);
+  ADD KEY `idxpurchaseitemsproductid` (`productid`),
+  ADD KEY `idxpurchaseitemsdebitaccount` (`debitaccountid`);
 
 --
 -- Indexes for table `purchases`
@@ -1236,7 +1394,8 @@ ALTER TABLE `purchases`
   ADD PRIMARY KEY (`purchaseid`),
   ADD KEY `idxpurchasessupplierid` (`supplierid`),
   ADD KEY `idxpurchasespurchasedate` (`purchasedate`),
-  ADD KEY `idxpurchasespaidfromaccountid` (`paidfromaccountid`);
+  ADD KEY `idxpurchasespaidfromaccountid` (`paidfromaccountid`),
+  ADD KEY `idxpurchasespayableaccount` (`payableaccountid`);
 
 --
 -- Indexes for table `quotationitems`
@@ -1292,6 +1451,22 @@ ALTER TABLE `salereturns`
   ADD KEY `idxsalereturnsreturndate` (`returndate`);
 
 --
+-- Indexes for table `sentsms`
+--
+ALTER TABLE `sentsms`
+  ADD PRIMARY KEY (`smsid`),
+  ADD KEY `idxsentsmsuserid` (`userid`),
+  ADD KEY `idxsentsmssentat` (`sentat`);
+
+--
+-- Indexes for table `sentsmsrecipients`
+--
+ALTER TABLE `sentsmsrecipients`
+  ADD PRIMARY KEY (`recipientid`),
+  ADD KEY `idxsentsmsrecipientssmsid` (`smsid`),
+  ADD KEY `idxsentsmsrecipientscustomerid` (`customerid`);
+
+--
 -- Indexes for table `shareholders`
 --
 ALTER TABLE `shareholders`
@@ -1305,6 +1480,12 @@ ALTER TABLE `shareholdershares`
   ADD PRIMARY KEY (`shareid`),
   ADD UNIQUE KEY `uqshareholdersharesshareholderid` (`shareholderid`),
   ADD UNIQUE KEY `uqshareholdersharesgroupname` (`groupname`);
+
+--
+-- Indexes for table `smsgateway`
+--
+ALTER TABLE `smsgateway`
+  ADD PRIMARY KEY (`smsgatewayid`);
 
 --
 -- Indexes for table `suppliers`
@@ -1321,6 +1502,13 @@ ALTER TABLE `users`
   ADD UNIQUE KEY `uqusersusername` (`username`);
 
 --
+-- Indexes for table `vat`
+--
+ALTER TABLE `vat`
+  ADD PRIMARY KEY (`vatid`),
+  ADD UNIQUE KEY `uqvatvatrate` (`vatrate`);
+
+--
 -- AUTO_INCREMENT for dumped tables
 --
 
@@ -1328,7 +1516,7 @@ ALTER TABLE `users`
 -- AUTO_INCREMENT for table `accounts`
 --
 ALTER TABLE `accounts`
-  MODIFY `accountid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique account number; identifies the account in every other table', AUTO_INCREMENT=7;
+  MODIFY `accountid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique account number; identifies the account in every other table', AUTO_INCREMENT=12;
 
 --
 -- AUTO_INCREMENT for table `accounttransfers`
@@ -1340,7 +1528,7 @@ ALTER TABLE `accounttransfers`
 -- AUTO_INCREMENT for table `activitylogs`
 --
 ALTER TABLE `activitylogs`
-  MODIFY `activityid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique activity row number', AUTO_INCREMENT=80;
+  MODIFY `activityid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique activity row number', AUTO_INCREMENT=88;
 
 --
 -- AUTO_INCREMENT for table `assetadjustments`
@@ -1358,13 +1546,13 @@ ALTER TABLE `assets`
 -- AUTO_INCREMENT for table `customerdepositrefunds`
 --
 ALTER TABLE `customerdepositrefunds`
-  MODIFY `depositrefundid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique deposit refund number; identifies the refund in every other table';
+  MODIFY `depositrefundid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique deposit refund number; identifies the refund in every other table', AUTO_INCREMENT=2;
 
 --
 -- AUTO_INCREMENT for table `customerdeposits`
 --
 ALTER TABLE `customerdeposits`
-  MODIFY `depositid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique deposit number; identifies the deposit in every other table';
+  MODIFY `depositid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique deposit number; identifies the deposit in every other table', AUTO_INCREMENT=2;
 
 --
 -- AUTO_INCREMENT for table `customerdepositusages`
@@ -1376,7 +1564,7 @@ ALTER TABLE `customerdepositusages`
 -- AUTO_INCREMENT for table `customers`
 --
 ALTER TABLE `customers`
-  MODIFY `customerid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique customer number; identifies the customer in every other table', AUTO_INCREMENT=4;
+  MODIFY `customerid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique customer number; identifies the customer in every other table', AUTO_INCREMENT=5;
 
 --
 -- AUTO_INCREMENT for table `employees`
@@ -1406,13 +1594,25 @@ ALTER TABLE `invoiceitems`
 -- AUTO_INCREMENT for table `invoices`
 --
 ALTER TABLE `invoices`
-  MODIFY `invoiceid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique invoice number; identifies the invoice in every other table';
+  MODIFY `invoiceid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique invoice number; identifies the invoice in every other table', AUTO_INCREMENT=12;
+
+--
+-- AUTO_INCREMENT for table `journalentries`
+--
+ALTER TABLE `journalentries`
+  MODIFY `journalentryid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `journallines`
+--
+ALTER TABLE `journallines`
+  MODIFY `journallineid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
 
 --
 -- AUTO_INCREMENT for table `livestock`
 --
 ALTER TABLE `livestock`
-  MODIFY `livestockid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique livestock number; identifies the livestock item in every other table', AUTO_INCREMENT=5;
+  MODIFY `livestockid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique livestock number; identifies the livestock item in every other table', AUTO_INCREMENT=8;
 
 --
 -- AUTO_INCREMENT for table `livestockstages`
@@ -1430,7 +1630,7 @@ ALTER TABLE `livestocktypes`
 -- AUTO_INCREMENT for table `payments`
 --
 ALTER TABLE `payments`
-  MODIFY `paymentid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique payment number; identifies the payment in every other table';
+  MODIFY `paymentid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique payment number; identifies the payment in every other table', AUTO_INCREMENT=2;
 
 --
 -- AUTO_INCREMENT for table `payrollbillitems`
@@ -1466,13 +1666,13 @@ ALTER TABLE `products`
 -- AUTO_INCREMENT for table `purchaseitems`
 --
 ALTER TABLE `purchaseitems`
-  MODIFY `purchaseitemid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique purchase line number; identifies the line in every other table';
+  MODIFY `purchaseitemid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique purchase line number; identifies the line in every other table', AUTO_INCREMENT=12;
 
 --
 -- AUTO_INCREMENT for table `purchases`
 --
 ALTER TABLE `purchases`
-  MODIFY `purchaseid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique purchase number; identifies the purchase in every other table';
+  MODIFY `purchaseid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique purchase number; identifies the purchase in every other table', AUTO_INCREMENT=11;
 
 --
 -- AUTO_INCREMENT for table `quotationitems`
@@ -1511,6 +1711,18 @@ ALTER TABLE `salereturns`
   MODIFY `returnid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique return number; identifies the return in every other table', AUTO_INCREMENT=2;
 
 --
+-- AUTO_INCREMENT for table `sentsms`
+--
+ALTER TABLE `sentsms`
+  MODIFY `smsid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique SMS batch number';
+
+--
+-- AUTO_INCREMENT for table `sentsmsrecipients`
+--
+ALTER TABLE `sentsmsrecipients`
+  MODIFY `recipientid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique recipient row number';
+
+--
 -- AUTO_INCREMENT for table `shareholders`
 --
 ALTER TABLE `shareholders`
@@ -1533,6 +1745,12 @@ ALTER TABLE `suppliers`
 --
 ALTER TABLE `users`
   MODIFY `userid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique user number; identifies the user in every other table', AUTO_INCREMENT=2;
+
+--
+-- AUTO_INCREMENT for table `vat`
+--
+ALTER TABLE `vat`
+  MODIFY `vatid` int(10) UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Unique VAT rate number';
 
 --
 -- Constraints for dumped tables
@@ -1602,6 +1820,7 @@ ALTER TABLE `expenses`
 -- Constraints for table `invoiceitems`
 --
 ALTER TABLE `invoiceitems`
+  ADD CONSTRAINT `fkinvoiceitemsinventoryaccount` FOREIGN KEY (`inventoryaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkinvoiceitemsinvoiceid` FOREIGN KEY (`invoiceid`) REFERENCES `invoices` (`invoiceid`) ON DELETE CASCADE ON UPDATE CASCADE,
   ADD CONSTRAINT `fkinvoiceitemslivestockid` FOREIGN KEY (`livestockid`) REFERENCES `livestock` (`livestockid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkinvoiceitemsproductid` FOREIGN KEY (`productid`) REFERENCES `products` (`productid`) ON UPDATE CASCADE;
@@ -1610,8 +1829,18 @@ ALTER TABLE `invoiceitems`
 -- Constraints for table `invoices`
 --
 ALTER TABLE `invoices`
+  ADD CONSTRAINT `fkinvoicescogsaccount` FOREIGN KEY (`cogsaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkinvoicescustomerid` FOREIGN KEY (`customerid`) REFERENCES `customers` (`customerid`) ON UPDATE CASCADE,
-  ADD CONSTRAINT `fkinvoicesreceivedinaccountid` FOREIGN KEY (`receivedinaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE;
+  ADD CONSTRAINT `fkinvoicesreceivableaccount` FOREIGN KEY (`receivableaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
+  ADD CONSTRAINT `fkinvoicesreceivedinaccountid` FOREIGN KEY (`receivedinaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
+  ADD CONSTRAINT `fkinvoicesrevenueaccount` FOREIGN KEY (`revenueaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE;
+
+--
+-- Constraints for table `journallines`
+--
+ALTER TABLE `journallines`
+  ADD CONSTRAINT `fkjournallinesaccount` FOREIGN KEY (`accountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
+  ADD CONSTRAINT `fkjournallinesentry` FOREIGN KEY (`journalentryid`) REFERENCES `journalentries` (`journalentryid`) ON DELETE CASCADE ON UPDATE CASCADE;
 
 --
 -- Constraints for table `payments`
@@ -1645,6 +1874,7 @@ ALTER TABLE `permissions`
 -- Constraints for table `purchaseitems`
 --
 ALTER TABLE `purchaseitems`
+  ADD CONSTRAINT `fkpurchaseitemsdebitaccount` FOREIGN KEY (`debitaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkpurchaseitemslivestockid` FOREIGN KEY (`livestockid`) REFERENCES `livestock` (`livestockid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkpurchaseitemsproductid` FOREIGN KEY (`productid`) REFERENCES `products` (`productid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkpurchaseitemspurchaseid` FOREIGN KEY (`purchaseid`) REFERENCES `purchases` (`purchaseid`) ON DELETE CASCADE ON UPDATE CASCADE;
@@ -1654,6 +1884,7 @@ ALTER TABLE `purchaseitems`
 --
 ALTER TABLE `purchases`
   ADD CONSTRAINT `fkpurchasespaidfromaccountid` FOREIGN KEY (`paidfromaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
+  ADD CONSTRAINT `fkpurchasespayableaccount` FOREIGN KEY (`payableaccountid`) REFERENCES `accounts` (`accountid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fkpurchasessupplierid` FOREIGN KEY (`supplierid`) REFERENCES `suppliers` (`supplierid`) ON UPDATE CASCADE;
 
 --
@@ -1700,6 +1931,19 @@ ALTER TABLE `salereturnitems`
 ALTER TABLE `salereturns`
   ADD CONSTRAINT `fksalereturnscustomerid` FOREIGN KEY (`customerid`) REFERENCES `customers` (`customerid`) ON UPDATE CASCADE,
   ADD CONSTRAINT `fksalereturnsinvoiceid` FOREIGN KEY (`invoiceid`) REFERENCES `invoices` (`invoiceid`) ON UPDATE CASCADE;
+
+--
+-- Constraints for table `sentsms`
+--
+ALTER TABLE `sentsms`
+  ADD CONSTRAINT `fksentsmsuserid` FOREIGN KEY (`userid`) REFERENCES `users` (`userid`) ON UPDATE CASCADE;
+
+--
+-- Constraints for table `sentsmsrecipients`
+--
+ALTER TABLE `sentsmsrecipients`
+  ADD CONSTRAINT `fksentsmsrecipientscustomerid` FOREIGN KEY (`customerid`) REFERENCES `customers` (`customerid`) ON DELETE SET NULL ON UPDATE CASCADE,
+  ADD CONSTRAINT `fksentsmsrecipientssmsid` FOREIGN KEY (`smsid`) REFERENCES `sentsms` (`smsid`) ON UPDATE CASCADE;
 
 --
 -- Constraints for table `shareholdershares`
