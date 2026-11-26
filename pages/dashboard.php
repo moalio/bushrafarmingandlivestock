@@ -14,6 +14,12 @@ declare(strict_types=1);
  * shows "Unavailable" and never takes the page down). One file: markup,
  * CSS and JS are inline with the CSP nonce (no inline style attributes
  * or event-handler attributes).
+ *
+ * Data source (real schema of bushrafarmingandlivestock.sql):
+ *   sales        = invoices      (invoicedate, totalamount, paidamount)
+ *   expenses     = expenses      (expensedate, amount)
+ *   receivables  = invoices      (totalamount - paidamount)
+ *   activity     = activitylogs  (+ users.name)
  * ---------------------------------------------------------------
  */
 
@@ -73,10 +79,10 @@ const DT_TREND_MONTHS   = 6;
 const DT_LOGO_FILE      = 'bushrofarmingandlivestocklogo.png'; // preferred logo file name
 const DT_LOGO_DIRS      = ['uploads', 'assets', 'images'];     // folders next to pages/ searched for the logo (in this order)
 
-/* Table and column names (fixed values, never user input). Fix a name here if your schema differs. */
+/* Table and column names (fixed values, never user input). */
 const BF_SCHEMA = [
-    'sales'    => ['table' => 'Sales',    'date' => 'SaleDate',    'total' => 'TotalAmount', 'paid' => 'PaidAmount', 'due' => 'DueDate'],
-    'expenses' => ['table' => 'Expenses', 'date' => 'ExpenseDate', 'total' => 'Amount'],
+    'sales'    => ['table' => 'invoices', 'date' => 'invoicedate', 'total' => 'totalamount', 'paid' => 'paidamount'],
+    'expenses' => ['table' => 'expenses', 'date' => 'expensedate', 'total' => 'amount'],
 ];
 
 /* ================================================================
@@ -208,7 +214,7 @@ function dt_time_ago(string $datetime): string
 }
 
 /**
- * Total of sales or expenses from a date (included) to a date (excluded).
+ * Total of sales (invoices) or expenses from a date (included) to a date (excluded).
  *
  * @param PDO    $pdo  Connection.
  * @param string $kind sales | expenses (key of BF_SCHEMA).
@@ -230,25 +236,26 @@ function dt_total_between(PDO $pdo, string $kind, string $from, string $to): flo
 
 /**
  * Open balance of sales (receivables).
+ * The invoices table has no due date column, so "overdue" cannot be computed;
+ * the total invoiced is returned instead (used by the Receivables bar).
  *
  * @param PDO    $pdo  Connection.
  * @param string $kind sales (key of BF_SCHEMA).
  *
- * @return array{amount:float,count:int,overdue:float} Open amount, open documents, overdue part.
+ * @return array{amount:float,count:int,invoiced:float} Open amount, open documents, total invoiced.
  */
 function dt_open_balance(PDO $pdo, string $kind): array
 {
     $s   = BF_SCHEMA[$kind];
     $row = dt_q(
         $pdo,
-        "SELECT COALESCE(SUM({$s['total']} - {$s['paid']}), 0) AS amount,
-                COUNT(*) AS cnt,
-                COALESCE(SUM(CASE WHEN {$s['due']} < CURDATE() THEN {$s['total']} - {$s['paid']} ELSE 0 END), 0) AS overdue
-           FROM {$s['table']}
-          WHERE {$s['total']} - {$s['paid']} > 0.004"
+        "SELECT COALESCE(SUM(CASE WHEN {$s['total']} - {$s['paid']} > 0.004 THEN {$s['total']} - {$s['paid']} ELSE 0 END), 0) AS amount,
+                COALESCE(SUM(CASE WHEN {$s['total']} - {$s['paid']} > 0.004 THEN 1 ELSE 0 END), 0) AS cnt,
+                COALESCE(SUM({$s['total']}), 0) AS invoiced
+           FROM {$s['table']}"
     )->fetch();
 
-    return ['amount' => (float)$row['amount'], 'count' => (int)$row['cnt'], 'overdue' => (float)$row['overdue']];
+    return ['amount' => (float)$row['amount'], 'count' => (int)$row['cnt'], 'invoiced' => (float)$row['invoiced']];
 }
 
 /**
@@ -348,10 +355,10 @@ function dt_stat(string $label, float|int|null $now, float|int|null $prev, strin
 /**
  * Build one stat card for an open balance (receivables).
  *
- * @param string                                          $label Card label.
- * @param array{amount:float,count:int,overdue:float}|null $open  Open balance (null = unavailable).
- * @param string                                          $icon  Icon key.
- * @param string                                          $tone  accent | primary.
+ * @param string                                              $label Card label.
+ * @param array{amount:float,count:int,invoiced:float}|null   $open  Open balance (null = unavailable).
+ * @param string                                              $icon  Icon key.
+ * @param string                                              $tone  accent | primary.
  *
  * @return array<string,mixed> Card definition.
  */
@@ -360,12 +367,11 @@ function dt_open_stat(string $label, ?array $open, string $icon, string $tone): 
     if ($open === null) {
         return ['label' => $label, 'value' => null, 'delta' => '', 'note' => 'Unavailable', 'icon' => $icon, 'tone' => $tone];
     }
-    $overdue = $open['overdue'] > 0.004;
 
     return [
         'label' => $label,
         'value' => dt_money($open['amount']),
-        'delta' => $overdue ? dt_delta(-1.0, dt_money($open['overdue']) . ' overdue') : '',
+        'delta' => '',
         'note'  => $open['count'] . ($open['count'] === 1 ? ' open document' : ' open documents'),
         'icon'  => $icon,
         'tone'  => $tone,
@@ -459,7 +465,7 @@ $monthStart = date('Y-m-01');
 $nextMonth  = date('Y-m-01', strtotime('first day of next month'));
 $prevMonth  = date('Y-m-01', strtotime('first day of last month'));
 
-// Sales and expenses: this month vs last month.
+// Sales (invoices) and expenses: this month vs last month.
 $salesNow  = dt_safe(static fn () => dt_total_between(dt_pdo(), 'sales', $monthStart, $nextMonth));
 $salesPrev = dt_safe(static fn () => dt_total_between(dt_pdo(), 'sales', $prevMonth, $monthStart));
 $expNow    = dt_safe(static fn () => dt_total_between(dt_pdo(), 'expenses', $monthStart, $nextMonth));
@@ -471,11 +477,11 @@ $receivables = dt_safe(static fn () => dt_open_balance(dt_pdo(), 'sales'));
 // Activity log (latest rows; ordered by the primary key so it stays fast as the log grows).
 $activities = dt_safe(static fn () => dt_q(
     dt_pdo(),
-    'SELECT a.Action AS action, a.Description AS description, a.ActivityDate AS activitydate,
-            COALESCE(u.Name, \'System\') AS username
-       FROM ActivityLogs a
-       LEFT JOIN Users u ON u.UserID = a.UserID
-      ORDER BY a.ActivityID DESC
+    'SELECT a.action AS action, a.description AS description, a.activitydate AS activitydate,
+            COALESCE(u.name, \'System\') AS username
+       FROM activitylogs a
+       LEFT JOIN users u ON u.userid = a.userid
+      ORDER BY a.activityid DESC
       LIMIT ' . DT_ACTIVITY_LIMIT
 )->fetchAll());
 
@@ -893,7 +899,7 @@ $nonce = dt_e(dt_nonce());
                 <div class="card-body">
                     <div class="card-head"><h2 class="header-title" id="balanceTitle">Receivables</h2></div>
                     <div class="legend">
-                        <span><i class="l-exp"></i>Overdue part of the open amount</span>
+                        <span><i class="l-exp"></i>Open part of the total invoiced</span>
                     </div>
                     <?php if ($receivables === null): ?>
                         <div class="city-item">
@@ -906,9 +912,9 @@ $nonce = dt_e(dt_nonce());
                         <div class="city-item">
                             <div class="city-row">
                                 <span class="city-code">Receivables</span>
-                                <span class="city-times"><?= dt_e(dt_money($receivables['overdue'])) ?> overdue of <?= dt_e(dt_money($receivables['amount'])) ?></span>
+                                <span class="city-times"><?= dt_e(dt_money($receivables['amount'])) ?> open of <?= dt_e(dt_money($receivables['invoiced'])) ?></span>
                             </div>
-                            <progress class="bar exp" max="<?= dt_e((string)max($receivables['amount'], 1.0)) ?>" value="<?= dt_e((string)$receivables['overdue']) ?>" aria-label="Receivables overdue share"></progress>
+                            <progress class="bar exp" max="<?= dt_e((string)max($receivables['invoiced'], 1.0)) ?>" value="<?= dt_e((string)$receivables['amount']) ?>" aria-label="Receivables open share"></progress>
                         </div>
                     <?php endif; ?>
                 </div>
