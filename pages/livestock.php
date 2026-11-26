@@ -140,6 +140,27 @@ const DT_JOURNAL_TYPES = [
     DT_ACC_COGS       => 'Expense',
 ];
 
+/** Journal roles: account types accepted for each role, and the code pre-selected by default (the old hardcoded accounts). */
+const DT_JOURNAL_OPENING = 'livestockopening'; // journalentries.sourcetype of the opening stock entry (varchar(20))
+
+const DT_ROLE_INFO = [
+    'inventory'  => ['types' => ['Assets'],    'default' => DT_ACC_LIVESTOCK],
+    'receivable' => ['types' => ['Assets'],    'default' => DT_ACC_RECEIVABLE],
+    'payable'    => ['types' => ['Liability'], 'default' => DT_ACC_PAYABLE],
+    'revenue'    => ['types' => ['Revenue'],   'default' => DT_ACC_REVENUE],
+    'cogs'       => ['types' => ['Expense'],   'default' => DT_ACC_COGS],
+    'equity'     => ['types' => ['Equity'],    'default' => '3000'], // change 3000 to your Opening Balance Equity code
+];
+
+/** Old version, never used. */
+const DT_ROLE_INFO_OLD = [
+    'inventory'  => ['types' => ['Assets'],    'default' => DT_ACC_LIVESTOCK],
+    'receivable' => ['types' => ['Assets'],    'default' => DT_ACC_RECEIVABLE],
+    'payable'    => ['types' => ['Liability'], 'default' => DT_ACC_PAYABLE],
+    'revenue'    => ['types' => ['Revenue'],   'default' => DT_ACC_REVENUE],
+    'cogs'       => ['types' => ['Expense'],   'default' => DT_ACC_COGS],
+];
+
 const BF_WALKIN_NAME = 'Walk-in'; // name of the customers row used for unregistered customers
 const DT_MAX_WALKIN  = 100;       // maximum length of the optional walk-in name
 
@@ -895,7 +916,23 @@ function dt_lock_livestock(PDO $pdo, int $id, string $field = ''): array
  *
  * @throws DtFail When the name is already used.
  */
-function dt_assert_unique_name(PDO $pdo, string $name, int $exceptId): void
+function dt_assert_unique_name(PDO $pdo, string $name, string $type, string $stage, int $exceptId): void
+{
+    $s     = BF_LIVESTOCK;
+    $count = (int)dt_q(
+        $pdo,
+        "SELECT COUNT(*) FROM `{$s['table']}`
+          WHERE LOWER(`{$s['name']}`) = LOWER(:n) AND LOWER(`{$s['type']}`) = LOWER(:t)
+            AND LOWER(`{$s['stage']}`) = LOWER(:s) AND `{$s['id']}` <> :id",
+        ['n' => $name, 't' => $type, 's' => $stage, 'id' => $exceptId]
+    )->fetchColumn();
+    if ($count > 0) {
+        throw new DtFail('A livestock item named "' . $name . '" with type "' . $type . '" and stage "' . $stage . '" already exists.', false, 'name');
+    }
+}
+
+/** Old version (name only), never called. */
+function dt_assert_unique_name_old(PDO $pdo, string $name, int $exceptId): void
 {
     $s     = BF_LIVESTOCK;
     $count = (int)dt_q(
@@ -1447,6 +1484,142 @@ function dt_read_purchase_input(): array
     $rawDate     = trim((string)($_POST['purchasedate'] ?? ''));
     $reference   = trim((string)($_POST['reference'] ?? ''));
     $note        = trim((string)($_POST['note'] ?? ''));
+    $rawPaid     = trim((string)($_POST['paidamount'] ?? ''));
+    $accountId   = max(0, (int)($_POST['paidfromaccountid'] ?? 0));
+
+    if (!$none && $supplierId <= 0) {
+        throw new DtFail('Supplier is required.', false, 'supplierid');
+    }
+    $date = dt_parse_date($rawDate, 'Purchase date must be a valid date.', 'purchasedate');
+    if (mb_strlen($reference) > DT_MAX_REFERENCE) {
+        throw new DtFail('Reference is too long (maximum ' . DT_MAX_REFERENCE . ' characters).', false, 'reference');
+    }
+    if (mb_strlen($note) > DT_MAX_NOTE) {
+        throw new DtFail('Note is too long (maximum ' . DT_MAX_NOTE . ' characters).', false, 'note');
+    }
+
+    $lines = dt_read_purchase_lines(false);
+    $total = 0;
+    foreach ($lines as $l) {
+        $total += $l['purchasecost'];
+    }
+
+    $paid = dt_parse_decimal(
+        $rawPaid === '' ? '0' : $rawPaid,
+        DT_TOTAL_INT_DIGITS,
+        2,
+        false,
+        'Paid amount must be 0 or more, with up to 2 decimals.',
+        'paidamount'
+    );
+    if ($paid > $total) {
+        throw new DtFail('Paid amount cannot be more than the purchase cost.', false, 'paidamount');
+    }
+    if ($none && $paid !== $total) {
+        throw new DtFail('A purchase without a supplier must be paid in full.', false, 'paidamount');
+    }
+    if ($paid > 0 && $accountId <= 0) {
+        throw new DtFail('Select the account the payment came from.', false, 'paidfromaccountid');
+    }
+
+    return [
+        'supplierid' => $supplierId,
+        'nosupplier' => $none,
+        'date'       => $date,
+        'reference'  => $reference === '' ? null : $reference,
+        'note'       => $note === '' ? null : $note,
+        'lines'      => $lines,
+        'total'      => $total,
+        'paid'       => $paid,
+        'accountid'  => $paid > 0 ? $accountId : 0,
+    ];
+}
+
+/**
+ * Read and validate the posted purchase lines (JSON in $_POST['lines']). Cost Each is computed here, never read from the browser.
+ *
+ * @param bool $calcOnly True for purchasecalc: livestock id and Price Each are not required.
+ *
+ * @return list<array{livestockid:int,qty:int,purchasecost:int,costeach:int,priceeach:int}> Clean lines (money in minor units).
+ *
+ * @throws DtFail On invalid input (field "lines" or "lines:N:livestock|quantity|purchasecost|priceeach").
+ */
+function dt_read_purchase_lines(bool $calcOnly): array
+{
+    $decoded = json_decode((string)($_POST['lines'] ?? ''), true);
+    if (!is_array($decoded) || $decoded === []) {
+        throw new DtFail('Add at least one line.', false, 'lines');
+    }
+    if (count($decoded) > DT_MAX_LINES) {
+        throw new DtFail('A purchase can have at most ' . DT_MAX_LINES . ' lines.', false, 'lines');
+    }
+
+    $lines = [];
+    $total = 0;
+    foreach (array_values($decoded) as $k => $raw) {
+        $n = $k + 1;
+        if (!is_array($raw)) {
+            throw new DtFail('Line ' . $n . ' is not valid.', false, 'lines');
+        }
+
+        $livestockId = 0;
+        if (!$calcOnly) {
+            $livestockId = max(0, (int)($raw['livestockid'] ?? 0));
+            if ($livestockId <= 0) {
+                throw new DtFail('Line ' . $n . ': select a livestock item.', false, 'lines:' . $n . ':livestock');
+            }
+        }
+
+        $rawQty = trim((string)($raw['quantity'] ?? ''));
+        if (!preg_match('/^\d{1,' . DT_QTY_INT_DIGITS . '}$/D', $rawQty) || (int)$rawQty <= 0) {
+            throw new DtFail('Line ' . $n . ': quantity must be a whole number greater than 0.', false, 'lines:' . $n . ':quantity');
+        }
+        $qty = (int)$rawQty;
+
+        $cost = dt_parse_decimal(
+            trim((string)($raw['purchasecost'] ?? '')),
+            DT_TOTAL_INT_DIGITS,
+            2,
+            false,
+            'Line ' . $n . ': purchase cost must be 0 or more, with up to 2 decimals.',
+            'lines:' . $n . ':purchasecost'
+        );
+        $each = dt_cost_each($cost, $qty);
+        if ($each > DT_MAX_PRICE_MINOR) {
+            throw new DtFail('Line ' . $n . ': cost each is too large (maximum ' . DT_MAX_MONEY . '). Check the purchase cost and the quantity.', false, 'lines:' . $n . ':purchasecost');
+        }
+
+        $priceEach = 0;
+        if (!$calcOnly) {
+            $priceEach = dt_parse_decimal(
+                trim((string)($raw['priceeach'] ?? '')),
+                DT_PRICE_INT_DIGITS,
+                DT_PRICE_SCALE,
+                false,
+                'Line ' . $n . ': Price Each must be 0 or more, with up to 2 decimals.',
+                'lines:' . $n . ':priceeach'
+            );
+        }
+
+        $total += $cost;
+        if ($total > DT_MAX_TOTAL_MINOR) {
+            throw new DtFail('The purchase total is too large.', false, 'lines');
+        }
+        $lines[] = ['livestockid' => $livestockId, 'qty' => $qty, 'purchasecost' => $cost, 'costeach' => $each, 'priceeach' => $priceEach];
+    }
+
+    return $lines;
+}
+
+/** Old one-line version, never called (delete it when you want). */
+function dt_read_purchase_input_v1(): array
+{
+    $rawSupplier = trim((string)($_POST['supplierid'] ?? ''));
+    $none        = strtolower($rawSupplier) === 'none';
+    $supplierId  = $none ? 0 : max(0, (int)$rawSupplier);
+    $rawDate     = trim((string)($_POST['purchasedate'] ?? ''));
+    $reference   = trim((string)($_POST['reference'] ?? ''));
+    $note        = trim((string)($_POST['note'] ?? ''));
     $livestockId = max(0, (int)($_POST['livestockid'] ?? 0));
     $rawQty      = trim((string)($_POST['quantity'] ?? ''));
     $rawCost     = trim((string)($_POST['purchasecost'] ?? ''));
@@ -1907,7 +2080,358 @@ function dt_journal_post(PDO $pdo, string $sourceType, int $sourceId, string $da
  *
  * @throws DtFail When an accounting account is missing.
  */
-function dt_journal_purchase_lines(PDO $pdo, int $total, int $paid, int $payAccountId): array
+function dt_journal_purchase_lines(array $lines, int $paid, int $payAccountId, int $payableAccountId): array
+{
+    $total   = 0;
+    $byDebit = [];
+    foreach ($lines as $l) {
+        $total += (int)$l['purchasecost'];
+        $byDebit[(int)$l['debit']] = ($byDebit[(int)$l['debit']] ?? 0) + (int)$l['purchasecost'];
+    }
+    $due = $total - $paid;
+    if ($due < 0) {
+        throw new DtFail('Paid amount cannot be more than the purchase cost.', false, 'paidamount');
+    }
+    $out = [];
+    ksort($byDebit);
+    foreach ($byDebit as $acc => $amount) {
+        if ($amount > 0) {
+            $out[] = ['account' => $acc, 'debit' => $amount, 'credit' => 0, 'skip' => 0];
+        }
+    }
+    if ($paid > 0) {
+        $out[] = ['account' => $payAccountId, 'debit' => 0, 'credit' => $paid, 'skip' => 1];
+    }
+    if ($due > 0) {
+        $out[] = ['account' => $payableAccountId, 'debit' => 0, 'credit' => $due, 'skip' => 0];
+    }
+
+    return $out;
+}
+
+/** Validate one chosen journal account (exists, ON, right type for its role). Returns the id, or 0 when not needed and not chosen. */
+function dt_pick_account(PDO $pdo, int $id, string $role, bool $needed, string $label, string $field): int
+{
+    if ($id <= 0) {
+        if ($needed) {
+            throw new DtFail($label . ' is required.', false, $field);
+        }
+
+        return 0;
+    }
+    $row = dt_q($pdo, 'SELECT accounttype, status FROM accounts WHERE accountid = :id', ['id' => $id])->fetch();
+    if (!is_array($row)) {
+        throw new DtFail('The selected ' . $label . ' does not exist.', false, $field);
+    }
+    if (strtoupper((string)$row['status']) !== 'ON') {
+        throw new DtFail('The selected ' . $label . ' is OFF in the Chart of Accounts.', false, $field);
+    }
+    $types = DT_ROLE_INFO[$role]['types'];
+    if (!in_array((string)$row['accounttype'], $types, true)) {
+        throw new DtFail('The ' . $label . ' must be of type ' . implode(' or ', $types) . '.', false, $field);
+    }
+
+    return $id;
+}
+
+/** Add the posted purchase accounts to the clean purchase input: header 'payable' and 'debit' on every line. */
+function dt_add_purchase_accounts(array $d): array
+{
+    $d['payable'] = max(0, (int)($_POST['payableaccountid'] ?? 0));
+    $decoded      = json_decode((string)($_POST['lines'] ?? ''), true);
+    $raw          = is_array($decoded) ? array_values($decoded) : [];
+    foreach ($d['lines'] as $k => $l) {
+        $r                       = $raw[$k] ?? null;
+        $d['lines'][$k]['debit'] = is_array($r) ? max(0, (int)($r['debitaccountid'] ?? 0)) : 0;
+    }
+
+    return $d;
+}
+
+/** Validate the accounts of a purchase. Returns the payable account id (0 when paid in full and none chosen). */
+function dt_purchase_check_accounts(PDO $pdo, array $d): int
+{
+    foreach ($d['lines'] as $k => $l) {
+        dt_pick_account($pdo, (int)$l['debit'], 'inventory', true, 'Line ' . ($k + 1) . ': inventory (debit) account', 'lines:' . ($k + 1) . ':debit');
+    }
+
+    return dt_pick_account($pdo, (int)$d['payable'], 'payable', ($d['total'] - $d['paid']) > 0, 'Accounts Payable (credit) account', 'payableaccountid');
+}
+
+/** Add the posted sale accounts to the clean sale input: header 'revenue', 'receivable', 'cogs' and 'inventory' on every line. */
+function dt_add_sale_accounts(array $d): array
+{
+    $d['revenue']    = max(0, (int)($_POST['revenueaccountid'] ?? 0));
+    $d['receivable'] = max(0, (int)($_POST['receivableaccountid'] ?? 0));
+    $d['cogs']       = max(0, (int)($_POST['cogsaccountid'] ?? 0));
+    $decoded         = json_decode((string)($_POST['inventoryaccounts'] ?? ''), true);
+    $inv             = is_array($decoded) ? array_values($decoded) : [];
+    foreach ($d['lines'] as $k => $l) {
+        $d['lines'][$k]['inventory'] = max(0, (int)($inv[$k] ?? 0));
+    }
+
+    return $d;
+}
+
+/**
+ * Validate the accounts of a sale. $lineCosts = cost of every line (quantity x cost each, minor units).
+ * $checkLines is false when the lines cannot change (invoice with returns or refunds).
+ *
+ * @return array{revenue:int,receivable:int,cogs:int,lines:array<int,int>} Account ids (0 = none).
+ */
+function dt_sale_check_accounts(PDO $pdo, array $d, int $total, int $paid, array $lineCosts, bool $checkLines): array
+{
+    $out = [
+        'revenue'    => dt_pick_account($pdo, (int)$d['revenue'], 'revenue', $total > 0, 'Sales Revenue (credit) account', 'revenueaccountid'),
+        'receivable' => dt_pick_account($pdo, (int)$d['receivable'], 'receivable', ($total - $paid) > 0, 'Accounts Receivable (debit) account', 'receivableaccountid'),
+        'cogs'       => dt_pick_account($pdo, (int)$d['cogs'], 'cogs', array_sum($lineCosts) > 0, 'Cost of Goods Sold (debit) account', 'cogsaccountid'),
+        'lines'      => [],
+    ];
+    if ($checkLines) {
+        foreach ($d['lines'] as $k => $l) {
+            $out['lines'][$k] = dt_pick_account($pdo, (int)$l['inventory'], 'inventory', ($lineCosts[$k] ?? 0) > 0, 'Line ' . ($k + 1) . ': inventory (credit) account', 'lines:' . ($k + 1) . ':inventory');
+        }
+    }
+
+    return $out;
+}
+
+/** Cost of the animals of an invoice grouped by inventory account (minor units). Old lines without an account use the default code. */
+function dt_invoice_cost_by_inventory(PDO $pdo, int $invoiceId): array
+{
+    $out = [];
+    foreach (dt_q(
+        $pdo,
+        'SELECT COALESCE(inventoryaccountid, 0) AS acc, SUM(quantity * costeach) AS cost FROM invoiceitems
+          WHERE invoiceid = :id GROUP BY COALESCE(inventoryaccountid, 0)',
+        ['id' => $invoiceId]
+    )->fetchAll() as $r) {
+        $cost = dt_sum_to_minor((string)$r['cost']);
+        if ($cost <= 0) {
+            continue;
+        }
+        $acc       = (int)$r['acc'] > 0 ? (int)$r['acc'] : dt_journal_account($pdo, DT_ACC_LIVESTOCK);
+        $out[$acc] = ($out[$acc] ?? 0) + $cost;
+    }
+    ksort($out);
+
+    return $out;
+}
+
+/** Active accounts for the journal selects, by type, and the default account id of every role (matched by the old codes). */
+function dt_lookup_journal_accounts(PDO $pdo): array
+{
+    $keys   = ['Assets' => 'assets', 'Liability' => 'liability', 'Equity' => 'equity', 'Revenue' => 'revenue', 'Expense' => 'expense'];
+    $lists  = ['assets' => [], 'liability' => [], 'equity' => [], 'revenue' => [], 'expense' => []];
+    $byCode = [];
+    $rows   = dt_q($pdo, "SELECT accountid, code, accountname, accounttype FROM accounts WHERE status = 'ON' AND accounttype IN ('Assets', 'Liability', 'Equity', 'Revenue', 'Expense')")->fetchAll();
+    usort($rows, static fn (array $a, array $b): int => strnatcmp((string)$a['code'], (string)$b['code']));
+    foreach ($rows as $r) {
+        $item                                      = ['accountid' => (int)$r['accountid'], 'code' => (string)$r['code'], 'accountname' => (string)$r['accountname']];
+        $lists[$keys[(string)$r['accounttype']]][] = $item;
+        $byCode[(string)$r['code']]                = $item['accountid'];
+    }
+    $defaults = [];
+    foreach (DT_ROLE_INFO as $role => $info) {
+        $defaults[$role] = $byCode[$info['default']] ?? 0;
+    }
+
+    return ['lists' => $lists, 'defaults' => $defaults];
+}
+
+/** Old version (no Equity list), never called. */
+function dt_lookup_journal_accounts_old(PDO $pdo): array
+{
+    $keys   = ['Assets' => 'assets', 'Liability' => 'liability', 'Revenue' => 'revenue', 'Expense' => 'expense'];
+    $lists  = ['assets' => [], 'liability' => [], 'revenue' => [], 'expense' => []];
+    $byCode = [];
+    $rows   = dt_q($pdo, "SELECT accountid, code, accountname, accounttype FROM accounts WHERE status = 'ON' AND accounttype IN ('Assets', 'Liability', 'Revenue', 'Expense')")->fetchAll();
+    usort($rows, static fn (array $a, array $b): int => strnatcmp((string)$a['code'], (string)$b['code']));
+    foreach ($rows as $r) {
+        $item                                   = ['accountid' => (int)$r['accountid'], 'code' => (string)$r['code'], 'accountname' => (string)$r['accountname']];
+        $lists[$keys[(string)$r['accounttype']]][] = $item;
+        $byCode[(string)$r['code']]             = $item['accountid'];
+    }
+    $defaults = [];
+    foreach (DT_ROLE_INFO as $role => $info) {
+        $defaults[$role] = $byCode[$info['default']] ?? 0;
+    }
+
+    return ['lists' => $lists, 'defaults' => $defaults];
+}
+
+/** Inventory account of the latest purchase line of every livestock item: [livestockid => accountid]. */
+function dt_last_inventory_accounts(PDO $pdo): array
+{
+    $out = [];
+    try {
+        foreach (dt_q(
+            $pdo,
+            'SELECT x.livestockid AS lid, x.debitaccountid AS acc FROM purchaseitems x
+              INNER JOIN (SELECT livestockid, MAX(purchaseitemid) AS mid FROM purchaseitems
+                           WHERE livestockid IS NOT NULL AND debitaccountid IS NOT NULL GROUP BY livestockid) m ON m.mid = x.purchaseitemid'
+        )->fetchAll() as $r) {
+            $out[(int)$r['lid']] = (int)$r['acc'];
+        }
+    } catch (PDOException $e) {
+        if (!in_array($e->getCode(), ['42S02', '42S22'], true)) {
+            throw $e;
+        }
+        dt_log_error('[livestock last inventory] skipped: ' . dt_describe_throwable($e));
+    }
+
+    return $out;
+}
+
+/** Add the account lists and the default inventory account of every livestock row to a lookups payload. */
+function dt_with_journal_lookups(PDO $pdo, array $data): array
+{
+    $last = dt_last_inventory_accounts($pdo);
+    foreach ($data['livestock'] as $k => $a) {
+        $data['livestock'][$k]['invaccount'] = $last[(int)$a['livestockid']] ?? 0;
+    }
+    $data['jaccounts'] = dt_lookup_journal_accounts($pdo);
+
+    return $data;
+}
+
+/** Add the posted opening-stock accounts and the opening value (stock x cost each, minor units) to the clean livestock input. */
+function dt_add_opening_accounts(array $d): array
+{
+    $d['invacc'] = max(0, (int)($_POST['inventoryaccountid'] ?? 0));
+    $d['eqacc']  = max(0, (int)($_POST['equityaccountid'] ?? 0));
+    $d['value']  = $d['stock'] * dt_decimal_to_minor($d['cost'], 2);
+    if ($d['value'] > DT_MAX_TOTAL_MINOR) {
+        throw new DtFail('The opening value (cost each x current stock) is too large (maximum 999,999,999.99).', false, 'currentstock');
+    }
+
+    return $d;
+}
+
+/**
+ * Post, replace or remove the opening stock journal entry of a livestock item (call inside the transaction).
+ * Dr Inventory / Cr Opening Balance Equity for stock x cost each.
+ * Add: both accounts are required when the value is above 0.
+ * Edit: an existing entry is replaced (removed when the value is 0). An item that never had an entry
+ * (bought through purchases) gets one only when the user chooses the accounts, so nothing is counted twice.
+ *
+ * @throws DtFail When an account is missing, OFF or of the wrong type.
+ */
+function dt_sync_opening_journal(PDO $pdo, array $d, int $livestockId, bool $edit): void
+{
+    $oldDate = false;
+    if ($edit) {
+        $oldDate = dt_q(
+            $pdo,
+            'SELECT entrydate FROM journalentries WHERE sourcetype = :t AND sourceid = :s ORDER BY journalentryid ASC LIMIT 1',
+            ['t' => DT_JOURNAL_OPENING, 's' => $livestockId]
+        )->fetchColumn();
+        dt_journal_delete($pdo, DT_JOURNAL_OPENING, $livestockId);
+    }
+    if ($d['value'] <= 0) {
+        return;
+    }
+    if ($edit && $oldDate === false && $d['invacc'] <= 0 && $d['eqacc'] <= 0) {
+        return; // item without an opening entry and no accounts chosen: nothing to post
+    }
+
+    $inv = dt_pick_account($pdo, $d['invacc'], 'inventory', true, 'Inventory (debit) account', 'inventoryaccountid');
+    $eq  = dt_pick_account($pdo, $d['eqacc'], 'equity', true, 'Opening Balance / Equity (credit) account', 'equityaccountid');
+
+    dt_journal_post(
+        $pdo,
+        DT_JOURNAL_OPENING,
+        $livestockId,
+        $oldDate !== false ? (string)$oldDate : date('Y-m-d'),
+        'Opening stock: ' . $d['name'],
+        [
+            ['account' => $inv, 'debit' => $d['value'], 'credit' => 0, 'skip' => 0],
+            ['account' => $eq, 'debit' => 0, 'credit' => $d['value'], 'skip' => 0],
+        ]
+    );
+}
+
+/** Opening entry of a livestock item for the Edit modal: whether it exists and its two accounts. */
+function dt_act_openingget(PDO $pdo): array
+{
+    $id  = max(0, (int)($_POST['livestockid'] ?? 0));
+    $out = ['has' => false, 'inv' => 0, 'eq' => 0];
+    foreach (dt_q(
+        $pdo,
+        'SELECT l.accountid, l.debit FROM journallines l INNER JOIN journalentries e ON e.journalentryid = l.journalentryid
+          WHERE e.sourcetype = :t AND e.sourceid = :s',
+        ['t' => DT_JOURNAL_OPENING, 's' => $id]
+    )->fetchAll() as $r) {
+        $out['has'] = true;
+        if ((float)$r['debit'] > 0) {
+            $out['inv'] = (int)$r['accountid'];
+        } else {
+            $out['eq'] = (int)$r['accountid'];
+        }
+    }
+
+    return ['success' => true, 'data' => $out];
+}
+
+function dt_act_purchaselookups_ja(PDO $pdo): array
+{
+    $r         = dt_act_purchaselookups($pdo);
+    $r['data'] = dt_with_journal_lookups($pdo, $r['data']);
+
+    return $r;
+}
+
+function dt_act_salelookups_ja(PDO $pdo): array
+{
+    $r         = dt_act_salelookups($pdo);
+    $r['data'] = dt_with_journal_lookups($pdo, $r['data']);
+
+    return $r;
+}
+
+function dt_act_purchaseeditlookups_ja(PDO $pdo): array
+{
+    $r         = dt_act_purchaseeditlookups($pdo); // throws as before
+    $id        = max(0, (int)($_POST['purchaseid'] ?? 0));
+    $r['data'] = dt_with_journal_lookups($pdo, $r['data']);
+    $r['data']['payableaccountid'] = (int)dt_q($pdo, 'SELECT COALESCE(payableaccountid, 0) FROM purchases WHERE purchaseid = :id', ['id' => $id])->fetchColumn();
+    $k = 0;
+    foreach (dt_q(
+        $pdo,
+        "SELECT COALESCE(debitaccountid, 0) FROM purchaseitems WHERE purchaseid = :id AND itemtype = 'Livestock' ORDER BY purchaseitemid ASC",
+        ['id' => $id]
+    )->fetchAll(PDO::FETCH_COLUMN) as $acc) {
+        if (isset($r['data']['lines'][$k])) {
+            $r['data']['lines'][$k]['debitaccountid'] = (int)$acc;
+        }
+        $k++;
+    }
+
+    return $r;
+}
+
+function dt_act_saleeditlookups_ja(PDO $pdo): array
+{
+    $r         = dt_act_saleeditlookups($pdo); // throws as before
+    $id        = max(0, (int)($_POST['invoiceid'] ?? 0));
+    $r['data'] = dt_with_journal_lookups($pdo, $r['data']);
+    $h         = dt_q($pdo, 'SELECT COALESCE(revenueaccountid, 0) AS r, COALESCE(receivableaccountid, 0) AS v, COALESCE(cogsaccountid, 0) AS c FROM invoices WHERE invoiceid = :id', ['id' => $id])->fetch();
+    $r['data']['revenueaccountid']    = (int)($h['r'] ?? 0);
+    $r['data']['receivableaccountid'] = (int)($h['v'] ?? 0);
+    $r['data']['cogsaccountid']       = (int)($h['c'] ?? 0);
+    $k = 0;
+    foreach (dt_q($pdo, 'SELECT COALESCE(inventoryaccountid, 0) FROM invoiceitems WHERE invoiceid = :id ORDER BY invoiceitemid ASC', ['id' => $id])->fetchAll(PDO::FETCH_COLUMN) as $acc) {
+        if (isset($r['data']['lines'][$k])) {
+            $r['data']['lines'][$k]['inventoryaccountid'] = (int)$acc;
+        }
+        $k++;
+    }
+
+    return $r;
+}
+
+/** Old version (hardcoded accounts), never called (delete it when you want). */
+function dt_journal_purchase_lines_old(PDO $pdo, int $total, int $paid, int $payAccountId): array
 {
     $due = $total - $paid;
     if ($due < 0) {
@@ -1941,7 +2465,38 @@ function dt_journal_purchase_lines(PDO $pdo, int $total, int $paid, int $payAcco
  *
  * @throws DtFail When an accounting account is missing.
  */
-function dt_journal_sale_lines(PDO $pdo, int $total, int $paid, int $recvAccount, int $cost): array
+function dt_journal_sale_lines(int $total, int $paid, int $recvAccount, array $costByInv, array $acc): array
+{
+    $due = $total - $paid;
+    if ($due < 0) {
+        throw new DtFail('Paid amount cannot be more than the total.', false, 'paidamount');
+    }
+    $cost  = array_sum($costByInv);
+    $lines = [];
+    if ($paid > 0) {
+        $lines[] = ['account' => $recvAccount, 'debit' => $paid, 'credit' => 0, 'skip' => 1];
+    }
+    if ($due > 0) {
+        $lines[] = ['account' => $acc['receivable'], 'debit' => $due, 'credit' => 0, 'skip' => 0];
+    }
+    if ($cost > 0) {
+        $lines[] = ['account' => $acc['cogs'], 'debit' => $cost, 'credit' => 0, 'skip' => 0];
+    }
+    if ($total > 0) {
+        $lines[] = ['account' => $acc['revenue'], 'debit' => 0, 'credit' => $total, 'skip' => 0];
+    }
+    ksort($costByInv);
+    foreach ($costByInv as $inv => $amount) {
+        if ($amount > 0) {
+            $lines[] = ['account' => (int)$inv, 'debit' => 0, 'credit' => $amount, 'skip' => 0];
+        }
+    }
+
+    return $lines;
+}
+
+/** Old version (hardcoded accounts), never called (delete it when you want). */
+function dt_journal_sale_lines_old(PDO $pdo, int $total, int $paid, int $recvAccount, int $cost): array
 {
     $due = $total - $paid;
     if ($due < 0) {
@@ -1965,6 +2520,38 @@ function dt_journal_sale_lines(PDO $pdo, int $total, int $paid, int $recvAccount
     }
 
     return $lines;
+}
+
+/**
+ * Remove the journal entry of a source record (purchase, sale ...) with its lines.
+ * Call it before posting a new entry on edit, and before deleting the source record. Missing journal tables are skipped.
+ *
+ * @param PDO    $pdo        Connection.
+ * @param string $sourceType purchase | sale | salereturn | salerefund.
+ * @param int    $sourceId   Id of the source record.
+ *
+ * @return void
+ *
+ * @throws PDOException On a database error other than a missing table or column.
+ */
+function dt_journal_delete(PDO $pdo, string $sourceType, int $sourceId): void
+{
+    try {
+        dt_q(
+            $pdo,
+            'DELETE l FROM journallines l INNER JOIN journalentries e ON e.journalentryid = l.journalentryid
+              WHERE e.sourcetype = :t AND e.sourceid = :s',
+            ['t' => $sourceType, 's' => $sourceId]
+        );
+        dt_q($pdo, 'DELETE FROM journalentries WHERE sourcetype = :t AND sourceid = :s', ['t' => $sourceType, 's' => $sourceId]);
+    } catch (PDOException $e) {
+        if (in_array($e->getCode(), ['42S02', '42S22'], true)) {
+            dt_log_error('[journal delete] skipped: ' . dt_describe_throwable($e));
+
+            return;
+        }
+        throw $e;
+    }
 }
 
 /* ---------- None supplier, purchase list rules, quotation list rules, customer position ---------- */
@@ -2082,7 +2669,7 @@ function dt_purchase_row(array $r): array
         'balance'      => dt_minor_to_decimal($due, 2),
         'status'       => $due <= 0 ? 'Paid' : ($paid > 0 ? 'Partial' : 'Unpaid'),
         'accountid'    => (int)($r['accountid'] ?? 0),
-        'editable'     => $lines === 1 && $stock === 1,
+        'editable'     => $lines > 0 && $stock === $lines,
         'deletable'    => $lines > 0 && $stock === $lines,
     ];
 }
@@ -3442,6 +4029,44 @@ function dt_act_list_OLD(PDO $pdo): array
  */
 function dt_act_save(PDO $pdo): array
 {
+    $d = dt_add_opening_accounts(dt_read_livestock_input());
+    $s = BF_LIVESTOCK;
+
+    return dt_transaction(static function (PDO $pdo) use ($d, $s): array {
+        if ($d['id'] > 0) {
+            dt_lock_livestock($pdo, $d['id']);
+            dt_assert_unique_name($pdo, $d['name'], $d['type'], $d['stage'], $d['id']);
+            $d['type']  = dt_assert_lookup_exists($pdo, BF_LIVESTOCKTYPES, $d['type'], 'type', 'Select a valid type.');
+            $d['stage'] = dt_assert_lookup_exists($pdo, BF_LIVESTOCKSTAGES, $d['stage'], 'stage', 'Select a valid stage.');
+            dt_q(
+                $pdo,
+                "UPDATE `{$s['table']}` SET `{$s['name']}` = :n, `{$s['type']}` = :t, `{$s['stock']}` = :q, `{$s['cost']}` = :c, `{$s['price']}` = :p, `{$s['stage']}` = :st WHERE `{$s['id']}` = :id",
+                ['n' => $d['name'], 't' => $d['type'], 'q' => $d['stock'], 'c' => $d['cost'], 'p' => $d['price'], 'st' => $d['stage'], 'id' => $d['id']]
+            );
+            dt_sync_opening_journal($pdo, $d, $d['id'], true);
+            dt_log_livestock($pdo, 'Update', 'Livestock updated: ' . $d['name']);
+
+            return ['success' => true, 'message' => 'Livestock updated successfully.'];
+        }
+
+        dt_assert_unique_name($pdo, $d['name'], $d['type'], $d['stage'], 0);
+        $d['type']  = dt_assert_lookup_exists($pdo, BF_LIVESTOCKTYPES, $d['type'], 'type', 'Select a valid type.');
+        $d['stage'] = dt_assert_lookup_exists($pdo, BF_LIVESTOCKSTAGES, $d['stage'], 'stage', 'Select a valid stage.');
+        dt_q(
+            $pdo,
+            "INSERT INTO `{$s['table']}` (`{$s['name']}`, `{$s['type']}`, `{$s['stock']}`, `{$s['cost']}`, `{$s['price']}`, `{$s['stage']}`) VALUES (:n, :t, :q, :c, :p, :st)",
+            ['n' => $d['name'], 't' => $d['type'], 'q' => $d['stock'], 'c' => $d['cost'], 'p' => $d['price'], 'st' => $d['stage']]
+        );
+        dt_sync_opening_journal($pdo, $d, (int)$pdo->lastInsertId(), false);
+        dt_log_livestock($pdo, 'Add', 'Livestock added: ' . $d['name']);
+
+        return ['success' => true, 'message' => 'Livestock added successfully.'];
+    });
+}
+
+/** Old version, never called. */
+function dt_act_save_old2(PDO $pdo): array
+{
     $d = dt_read_livestock_input();
     $s = BF_LIVESTOCK;
 
@@ -3532,6 +4157,7 @@ function dt_act_delete(PDO $pdo): array
         }
 
         dt_q($pdo, "DELETE FROM `{$s['table']}` WHERE `{$s['id']}` = :id", ['id' => $id]);
+        dt_journal_delete($pdo, DT_JOURNAL_OPENING, $id);
         dt_log_livestock($pdo, 'Delete', 'Livestock deleted: ' . $row['name']);
 
         return ['success' => true, 'message' => 'Livestock deleted successfully.'];
@@ -3730,6 +4356,33 @@ function dt_act_purchaselookups_old(PDO $pdo): array
  */
 function dt_act_purchasecalc(PDO $pdo): array
 {
+    $rawPaid  = trim((string)($_POST['paidamount'] ?? ''));
+    $complete = (string)($_POST['complete'] ?? '') === '1';
+
+    $lines = dt_read_purchase_lines(true);
+    $total = 0;
+    $each  = [];
+    foreach ($lines as $l) {
+        $total += $l['purchasecost'];
+        $each[] = dt_minor_to_decimal($l['costeach'], 2);
+    }
+
+    $paid = dt_parse_decimal($rawPaid === '' ? '0' : $rawPaid, DT_TOTAL_INT_DIGITS, 2, false, 'Paid amount must be 0 or more, with up to 2 decimals.', 'paidamount');
+    if ($complete && $paid > $total) {
+        throw new DtFail('Paid amount cannot be more than the purchase cost.', false, 'paidamount');
+    }
+
+    return ['success' => true, 'data' => [
+        'lines'        => $each,
+        'purchasecost' => dt_minor_to_decimal($total, 2),
+        'paid'         => dt_minor_to_decimal($paid, 2),
+        'balance'      => dt_minor_to_decimal(max(0, $total - $paid), 2),
+    ]];
+}
+
+/** Old one-line version, never called (delete it when you want). */
+function dt_act_purchasecalc_v1(PDO $pdo): array
+{
     $rawQty  = trim((string)($_POST['quantity'] ?? ''));
     $rawCost = trim((string)($_POST['purchasecost'] ?? ''));
     $rawPaid = trim((string)($_POST['paidamount'] ?? ''));
@@ -3767,6 +4420,282 @@ function dt_act_purchasecalc(PDO $pdo): array
  * @throws DtFail On invalid input or a broken rule.
  */
 function dt_act_purchasesave(PDO $pdo): array
+{
+    $d = dt_add_purchase_accounts(dt_read_purchase_input()); // NEW: payable + debit account per line
+
+    return dt_transaction(static function (PDO $pdo) use ($d): array {
+        $p = BF_PURCHASES;
+        $i = BF_PURCHASEITEMS;
+        $s = BF_LIVESTOCK;
+
+        if ($d['nosupplier']) {
+            $d['supplierid'] = dt_none_supplier_id($pdo);
+        }
+
+        $supplier = dt_q($pdo, 'SELECT name FROM suppliers WHERE supplierid = :id', ['id' => $d['supplierid']])->fetchColumn();
+        if ($supplier === false) {
+            throw new DtFail('The selected supplier does not exist.', false, 'supplierid');
+        }
+        $supplier = (string)$supplier;
+
+        $accountLabel = '';
+        if ($d['paid'] > 0) {
+            $account = dt_q($pdo, 'SELECT accounttype, code, accountname FROM accounts WHERE accountid = :id', ['id' => $d['accountid']])->fetch();
+            if (!is_array($account)) {
+                throw new DtFail('The selected account does not exist.', false, 'paidfromaccountid');
+            }
+            if ((string)$account['accounttype'] !== 'Assets') {
+                throw new DtFail('The paying account must be an Assets account.', false, 'paidfromaccountid');
+            }
+            $accountLabel = (string)$account['code'] . ' ' . (string)$account['accountname'];
+        }
+
+        $payableId = dt_purchase_check_accounts($pdo, $d); // NEW: server validation of the double entry accounts
+
+        /* a. Lock all livestock rows in ascending id order. */
+        $first = [];
+        foreach ($d['lines'] as $k => $l) {
+            $first[$l['livestockid']] ??= $k + 1;
+        }
+        $animals = dt_lock_livestock_set($pdo, array_keys($first), $first);
+
+        /* b. Stock limit: SUM per animal over the lines. */
+        $added = [];
+        foreach ($d['lines'] as $k => $l) {
+            $lid         = $l['livestockid'];
+            $added[$lid] = ($added[$lid] ?? 0) + $l['qty'];
+            if ((int)$animals[$lid]['stock'] + $added[$lid] > DT_MAX_STOCK) {
+                throw new DtFail('Cannot purchase: ' . $animals[$lid]['name'] . ' stock would exceed ' . number_format(DT_MAX_STOCK) . '.', false, 'lines:' . ($k + 1) . ':quantity');
+            }
+        }
+
+        /* c. Balance rule. */
+        if ($d['paid'] > 0) {
+            dt_lock_accounts($pdo, [$d['accountid']]);
+            $available = dt_account_balances($pdo, $d['accountid'])[$d['accountid']] ?? 0;
+            if ($d['paid'] > $available) {
+                throw new DtFail(
+                    'Insufficient balance in ' . $accountLabel . ': available ' . dt_format_minor($available) . ', required ' . dt_format_minor($d['paid']) . '.',
+                    false,
+                    'paidamount'
+                );
+            }
+        }
+
+        /* d. Purchase header (with the payable account) and one line per posted line (with its debit account). */
+        dt_q(
+            $pdo,
+            "INSERT INTO `{$p['table']}` (`{$p['supplierid']}`, `{$p['date']}`, `{$p['reference']}`, `{$p['total']}`, `{$p['paid']}`, `{$p['account']}`, `payableaccountid`, `{$p['note']}`)
+             VALUES (:sup, :dt, :ref, :tot, :pd, :acc, :pay, :nt)",
+            [
+                'sup' => $d['supplierid'],
+                'dt'  => $d['date'],
+                'ref' => $d['reference'],
+                'tot' => dt_minor_to_decimal($d['total'], 2),
+                'pd'  => dt_minor_to_decimal($d['paid'], 2),
+                'acc' => $d['paid'] > 0 ? $d['accountid'] : null,
+                'pay' => $payableId > 0 ? $payableId : null,
+                'nt'  => $d['note'],
+            ]
+        );
+        $purchaseId = (int)$pdo->lastInsertId();
+
+        $ins = $pdo->prepare(
+            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['priceeach']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`, `debitaccountid`)
+             VALUES (:p, 'Livestock', :l, NULL, :q, :u, :sp, :lt, :sa, :da)"
+        );
+        foreach ($d['lines'] as $l) {
+            $ins->execute([
+                'p'  => $purchaseId,
+                'l'  => $l['livestockid'],
+                'q'  => dt_minor_to_decimal($l['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
+                'u'  => dt_minor_to_decimal($l['costeach'], 2),
+                'sp' => dt_minor_to_decimal($l['priceeach'], 2),
+                'lt' => dt_minor_to_decimal($l['purchasecost'], 2),
+                'sa' => $l['qty'],
+                'da' => $l['debit'],
+            ]);
+        }
+
+        /* e. Stock (ascending id order, same as the locks). */
+        ksort($added);
+        foreach ($added as $lid => $qty) {
+            dt_q($pdo, "UPDATE `{$s['table']}` SET `{$s['stock']}` = `{$s['stock']}` + :q WHERE `{$s['id']}` = :id", ['q' => $qty, 'id' => $lid]);
+        }
+
+        /* e2. The latest line of each animal decides its Cost Each and Price Each. */
+        $latest = [];
+        foreach ($d['lines'] as $l) {
+            $latest[$l['livestockid']] = $l;
+        }
+        ksort($latest);
+        foreach ($latest as $lid => $l) {
+            dt_q(
+                $pdo,
+                "UPDATE `{$s['table']}` SET `{$s['cost']}` = :c, `{$s['price']}` = :p WHERE `{$s['id']}` = :id",
+                ['c' => dt_minor_to_decimal($l['costeach'], 2), 'p' => dt_minor_to_decimal($l['priceeach'], 2), 'id' => $lid]
+            );
+        }
+
+        /* f. Automatic payment row. */
+        if ($d['paid'] > 0) {
+            dt_sync_payment($pdo, $purchaseId, $d['supplierid'], $d['accountid'], $d['paid'], $d['date']);
+        }
+
+        /* g. Double entry: Dr the chosen inventory accounts, Cr paying account, Cr the chosen payable account. */
+        dt_journal_post(
+            $pdo,
+            'purchase',
+            $purchaseId,
+            $d['date'],
+            'Purchase #' . $purchaseId . ' ' . $supplier,
+            dt_journal_purchase_lines($d['lines'], $d['paid'], $d['accountid'], $payableId)
+        );
+
+        dt_log_purchase($pdo, 'Add', 'Purchase added: #' . $purchaseId . ' ' . $supplier);
+
+        return ['success' => true, 'message' => 'Purchase #' . $purchaseId . ' saved.', 'purchaseid' => $purchaseId];
+    });
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_act_purchasesave_old2(PDO $pdo): array
+{
+    $d = dt_read_purchase_input();
+
+    return dt_transaction(static function (PDO $pdo) use ($d): array {
+        $p = BF_PURCHASES;
+        $i = BF_PURCHASEITEMS;
+        $s = BF_LIVESTOCK;
+
+        if ($d['nosupplier']) {
+            $d['supplierid'] = dt_none_supplier_id($pdo);
+        }
+
+        $supplier = dt_q($pdo, 'SELECT name FROM suppliers WHERE supplierid = :id', ['id' => $d['supplierid']])->fetchColumn();
+        if ($supplier === false) {
+            throw new DtFail('The selected supplier does not exist.', false, 'supplierid');
+        }
+        $supplier = (string)$supplier;
+
+        $accountLabel = '';
+        if ($d['paid'] > 0) {
+            $account = dt_q($pdo, 'SELECT accounttype, code, accountname FROM accounts WHERE accountid = :id', ['id' => $d['accountid']])->fetch();
+            if (!is_array($account)) {
+                throw new DtFail('The selected account does not exist.', false, 'paidfromaccountid');
+            }
+            if ((string)$account['accounttype'] !== 'Assets') {
+                throw new DtFail('The paying account must be an Assets account.', false, 'paidfromaccountid');
+            }
+            $accountLabel = (string)$account['code'] . ' ' . (string)$account['accountname'];
+        }
+
+        /* a. Lock all livestock rows in ascending id order. */
+        $first = [];
+        foreach ($d['lines'] as $k => $l) {
+            $first[$l['livestockid']] ??= $k + 1;
+        }
+        $animals = dt_lock_livestock_set($pdo, array_keys($first), $first);
+
+        /* b. Stock limit: SUM per animal over the lines. */
+        $added = [];
+        foreach ($d['lines'] as $k => $l) {
+            $lid         = $l['livestockid'];
+            $added[$lid] = ($added[$lid] ?? 0) + $l['qty'];
+            if ((int)$animals[$lid]['stock'] + $added[$lid] > DT_MAX_STOCK) {
+                throw new DtFail('Cannot purchase: ' . $animals[$lid]['name'] . ' stock would exceed ' . number_format(DT_MAX_STOCK) . '.', false, 'lines:' . ($k + 1) . ':quantity');
+            }
+        }
+
+        /* c. Balance rule. */
+        if ($d['paid'] > 0) {
+            dt_lock_accounts($pdo, [$d['accountid']]);
+            $available = dt_account_balances($pdo, $d['accountid'])[$d['accountid']] ?? 0;
+            if ($d['paid'] > $available) {
+                throw new DtFail(
+                    'Insufficient balance in ' . $accountLabel . ': available ' . dt_format_minor($available) . ', required ' . dt_format_minor($d['paid']) . '.',
+                    false,
+                    'paidamount'
+                );
+            }
+        }
+
+        /* d. Purchase header and one line per posted line. */
+        dt_q(
+            $pdo,
+            "INSERT INTO `{$p['table']}` (`{$p['supplierid']}`, `{$p['date']}`, `{$p['reference']}`, `{$p['total']}`, `{$p['paid']}`, `{$p['account']}`, `{$p['note']}`)
+             VALUES (:sup, :dt, :ref, :tot, :pd, :acc, :nt)",
+            [
+                'sup' => $d['supplierid'],
+                'dt'  => $d['date'],
+                'ref' => $d['reference'],
+                'tot' => dt_minor_to_decimal($d['total'], 2),
+                'pd'  => dt_minor_to_decimal($d['paid'], 2),
+                'acc' => $d['paid'] > 0 ? $d['accountid'] : null,
+                'nt'  => $d['note'],
+            ]
+        );
+        $purchaseId = (int)$pdo->lastInsertId();
+
+        $ins = $pdo->prepare(
+            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['priceeach']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`)
+             VALUES (:p, 'Livestock', :l, NULL, :q, :u, :sp, :lt, :sa)"
+        );
+        foreach ($d['lines'] as $l) {
+            $ins->execute([
+                'p'  => $purchaseId,
+                'l'  => $l['livestockid'],
+                'q'  => dt_minor_to_decimal($l['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
+                'u'  => dt_minor_to_decimal($l['costeach'], 2),
+                'sp' => dt_minor_to_decimal($l['priceeach'], 2),
+                'lt' => dt_minor_to_decimal($l['purchasecost'], 2),
+                'sa' => $l['qty'],
+            ]);
+        }
+
+        /* e. Stock (ascending id order, same as the locks). */
+        ksort($added);
+        foreach ($added as $lid => $qty) {
+            dt_q($pdo, "UPDATE `{$s['table']}` SET `{$s['stock']}` = `{$s['stock']}` + :q WHERE `{$s['id']}` = :id", ['q' => $qty, 'id' => $lid]);
+        }
+
+        /* e2. The latest line of each animal decides its Cost Each and Price Each. */
+        $latest = [];
+        foreach ($d['lines'] as $l) {
+            $latest[$l['livestockid']] = $l;
+        }
+        ksort($latest);
+        foreach ($latest as $lid => $l) {
+            dt_q(
+                $pdo,
+                "UPDATE `{$s['table']}` SET `{$s['cost']}` = :c, `{$s['price']}` = :p WHERE `{$s['id']}` = :id",
+                ['c' => dt_minor_to_decimal($l['costeach'], 2), 'p' => dt_minor_to_decimal($l['priceeach'], 2), 'id' => $lid]
+            );
+        }
+
+        /* f. Automatic payment row. */
+        if ($d['paid'] > 0) {
+            dt_sync_payment($pdo, $purchaseId, $d['supplierid'], $d['accountid'], $d['paid'], $d['date']);
+        }
+
+        /* g. Double entry (same transaction): Dr Livestock inventory, Cr paying account, Cr Accounts Payable. */
+        dt_journal_post(
+            $pdo,
+            'purchase',
+            $purchaseId,
+            $d['date'],
+            'Purchase #' . $purchaseId . ' ' . $supplier,
+            dt_journal_purchase_lines($pdo, $d['total'], $d['paid'], $d['accountid'])
+        );
+
+        dt_log_purchase($pdo, 'Add', 'Purchase added: #' . $purchaseId . ' ' . $supplier);
+
+        return ['success' => true, 'message' => 'Purchase #' . $purchaseId . ' saved.', 'purchaseid' => $purchaseId];
+    });
+}
+
+/** Old one-line version, never called (delete it when you want). */
+function dt_act_purchasesave_v1(PDO $pdo): array
 {
     $d = dt_read_purchase_input();
 
@@ -4021,6 +4950,123 @@ function dt_act_salelookups(PDO $pdo): array
  * @throws DtFail On invalid input or a broken rule.
  */
 function dt_act_salesave(PDO $pdo): array
+{
+    $d = dt_add_sale_accounts(dt_read_sale_input()); // NEW: revenue, receivable, COGS + inventory account per line
+
+    return dt_transaction(static function (PDO $pdo) use ($d): array {
+        $p = BF_INVOICES;
+        $i = BF_INVOICEITEMS;
+        $s = BF_LIVESTOCK;
+
+        if ($d['walkin']) {
+            $d['customerid'] = dt_walkin_customer_id($pdo);
+        }
+
+        $customer = dt_q($pdo, 'SELECT name FROM customers WHERE customerid = :id', ['id' => $d['customerid']])->fetchColumn();
+        if ($customer === false) {
+            throw new DtFail('The selected customer does not exist.', false, 'customerid');
+        }
+        $customer = (string)$customer;
+
+        if ($d['paid'] > 0) {
+            $type = dt_q($pdo, 'SELECT accounttype FROM accounts WHERE accountid = :id', ['id' => $d['accountid']])->fetchColumn();
+            if ($type === false) {
+                throw new DtFail('The selected account does not exist.', false, 'receivedinaccountid');
+            }
+            if ((string)$type !== 'Assets') {
+                throw new DtFail('The receiving account must be an Assets account.', false, 'receivedinaccountid');
+            }
+        }
+
+        /* a. Lock all livestock rows in ascending id order, then the account. */
+        $first = [];
+        foreach ($d['lines'] as $k => $l) {
+            $first[$l['livestockid']] ??= $k + 1;
+        }
+        $animals = dt_lock_livestock_set($pdo, array_keys($first), $first);
+        if ($d['paid'] > 0) {
+            dt_lock_accounts($pdo, [$d['accountid']]);
+        }
+
+        /* b. Stock rule: SUM per animal. */
+        $available = [];
+        foreach ($animals as $lid => $a) {
+            $available[$lid] = (int)$a['stock'];
+        }
+        $taken = dt_check_sale_stock($d['lines'], $available, $animals);
+
+        /* b2. NEW: server validation of the double entry accounts (cost of every line = quantity x cost each today). */
+        $lineCosts = [];
+        foreach ($d['lines'] as $k => $l) {
+            $lineCosts[$k] = $l['qty'] * dt_decimal_to_minor((string)$animals[$l['livestockid']]['costeach'], 2);
+        }
+        $acc = dt_sale_check_accounts($pdo, $d, $d['total'], $d['paid'], $lineCosts, true);
+
+        /* c. Invoice (with revenue, receivable and COGS accounts) and one line per posted line (with its inventory account). */
+        dt_q(
+            $pdo,
+            "INSERT INTO `{$p['table']}` (`{$p['customerid']}`, `{$p['date']}`, `{$p['reference']}`, `{$p['total']}`, `{$p['paid']}`, `{$p['account']}`, `revenueaccountid`, `receivableaccountid`, `cogsaccountid`, `{$p['note']}`)
+             VALUES (:cus, :dt, :ref, :tot, :pd, :acc, :rev, :rec, :cg, :nt)",
+            [
+                'cus' => $d['customerid'],
+                'dt'  => $d['date'],
+                'ref' => $d['reference'],
+                'tot' => dt_minor_to_decimal($d['total'], 2),
+                'pd'  => dt_minor_to_decimal($d['paid'], 2),
+                'acc' => $d['paid'] > 0 ? $d['accountid'] : null,
+                'rev' => $acc['revenue'] > 0 ? $acc['revenue'] : null,
+                'rec' => $acc['receivable'] > 0 ? $acc['receivable'] : null,
+                'cg'  => $acc['cogs'] > 0 ? $acc['cogs'] : null,
+                'nt'  => $d['note'],
+            ]
+        );
+        $invoiceId = (int)$pdo->lastInsertId();
+
+        $ins = $pdo->prepare(
+            "INSERT INTO `{$i['table']}` (`{$i['invoiceid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['priceeach']}`, `{$i['costeach']}`, `{$i['linetotal']}`, `inventoryaccountid`)
+             VALUES (:p, 'Livestock', :l, NULL, :q, :u, :uc, :lt, :ia)"
+        );
+        foreach ($d['lines'] as $k => $l) {
+            $ins->execute([
+                'p'  => $invoiceId,
+                'l'  => $l['livestockid'],
+                'q'  => $l['qty'],
+                'u'  => dt_minor_to_decimal($l['price'], 2),
+                'uc' => (string)$animals[$l['livestockid']]['costeach'],
+                'lt' => dt_minor_to_decimal($l['total'], 2),
+                'ia' => $acc['lines'][$k] > 0 ? $acc['lines'][$k] : null,
+            ]);
+        }
+
+        /* d. Stock (never below 0), ascending id order. */
+        ksort($taken);
+        foreach ($taken as $lid => $qty) {
+            dt_q($pdo, "UPDATE `{$s['table']}` SET `{$s['stock']}` = :q WHERE `{$s['id']}` = :id", ['q' => max(0, $available[$lid] - $qty), 'id' => $lid]);
+        }
+
+        /* e. Automatic receipt. */
+        if ($d['paid'] > 0) {
+            dt_sync_receipt($pdo, $invoiceId, $d['customerid'], $d['accountid'], $d['paid'], $d['date']);
+        }
+
+        /* f. Double entry: Dr receipt account / receivable / COGS, Cr revenue / the chosen inventory accounts. */
+        dt_journal_post(
+            $pdo,
+            'sale',
+            $invoiceId,
+            $d['date'],
+            'Sale #' . $invoiceId . ' ' . $customer,
+            dt_journal_sale_lines($d['total'], $d['paid'], $d['accountid'], dt_invoice_cost_by_inventory($pdo, $invoiceId), $acc)
+        );
+
+        dt_log_sale($pdo, 'Add', 'Sale added: #' . $invoiceId . ' ' . $customer);
+
+        return ['success' => true, 'message' => 'Sale #' . $invoiceId . ' saved.', 'invoiceid' => $invoiceId];
+    });
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_act_salesave_old2(PDO $pdo): array
 {
     $d = dt_read_sale_input();
 
@@ -4385,6 +5431,233 @@ function dt_act_saleeditlookups(PDO $pdo): array
 function dt_act_saleupdate(PDO $pdo): array
 {
     $id = max(0, (int)($_POST['invoiceid'] ?? 0));
+    $d  = dt_add_sale_accounts(dt_read_sale_input()); // NEW
+
+    return dt_transaction(static function (PDO $pdo) use ($id, $d): array {
+        $v  = BF_INVOICES;
+        $it = BF_INVOICEITEMS;
+        $s  = BF_LIVESTOCK;
+
+        $invoice    = dt_lock_invoice($pdo, $id, 'invoiceid');
+        if ($d['walkin']) {
+            $d['customerid'] = dt_walkin_customer_id($pdo);
+        }
+        $oldAccount = (int)dt_q($pdo, "SELECT COALESCE(`{$v['account']}`, 0) FROM `{$v['table']}` WHERE `{$v['id']}` = :id", ['id' => $id])->fetchColumn();
+        $oldPaid    = dt_sum_to_minor((string)$invoice['paidamount']);
+        $oldTotal   = dt_sum_to_minor((string)$invoice['totalamount']);
+        $flags      = dt_invoice_flags($pdo, $id);
+        $locked     = $flags['returns'] > 0 || $flags['refunds'] > 0;
+
+        $old = [];
+        foreach (dt_q(
+            $pdo,
+            "SELECT `{$it['itemtype']}` AS itemtype, `{$it['livestockid']}` AS livestockid, `{$it['quantity']}` AS quantity,
+                    `{$it['priceeach']}` AS priceeach, `{$it['costeach']}` AS costeach, `{$it['linetotal']}` AS linetotal
+               FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id ORDER BY `{$it['id']}` ASC FOR UPDATE",
+            ['id' => $id]
+        )->fetchAll() as $row) {
+            if ((string)$row['itemtype'] !== 'Livestock') {
+                throw new DtFail('Cannot change invoice #' . $id . ': it has product lines.', true);
+            }
+            $old[] = [
+                'livestockid' => (int)$row['livestockid'],
+                'qty'         => (int)$row['quantity'],
+                'price'       => dt_decimal_to_minor((string)$row['priceeach'], 2),
+                'total'       => dt_decimal_to_minor((string)$row['linetotal'], 2),
+                'cost'        => (string)$row['costeach'],
+            ];
+        }
+
+        $customer = dt_q($pdo, 'SELECT name FROM customers WHERE customerid = :id', ['id' => $d['customerid']])->fetchColumn();
+        if ($customer === false) {
+            throw new DtFail('The selected customer does not exist.', false, 'customerid');
+        }
+        $customer = (string)$customer;
+        if ($locked) {
+            if ($d['customerid'] !== (int)$invoice['customerid']) {
+                throw new DtFail('The customer cannot change: this invoice has returns or refunds.', false, 'customerid');
+            }
+            if ($flags['firstdate'] !== null && $d['date'] > $flags['firstdate']) {
+                throw new DtFail('Sale date cannot be after the first return or refund (' . $flags['firstdate'] . ').', false, 'saledate');
+            }
+        }
+
+        if ($locked) {
+            $lines = [];
+            foreach ($old as $o) {
+                $lines[] = ['livestockid' => $o['livestockid'], 'qty' => $o['qty'], 'price' => $o['price'], 'total' => $o['total']];
+            }
+            $total = $oldTotal;
+        } else {
+            $lines = $d['lines'];
+            $total = $d['total'];
+        }
+
+        $paid = $d['paid'];
+        if ($d['walkin'] && $paid !== $total) {
+            throw new DtFail('A walk-in sale must be paid in full.', false, 'paidamount');
+        }
+        if ($paid > $total) {
+            throw new DtFail('Paid amount cannot be more than the total.', false, 'paidamount');
+        }
+        if ($paid < $flags['refunded']) {
+            throw new DtFail('Paid amount cannot be less than the refunds already made (' . dt_format_minor($flags['refunded']) . ').', false, 'paidamount');
+        }
+        if ($flags['manual'] && $paid !== $oldPaid) {
+            throw new DtFail('Cannot change the paid amount: this invoice has receipts entered on the Receipts page. Change those receipts instead.', false, 'paidamount');
+        }
+        $newAccount = $flags['manual'] ? $oldAccount : ($paid > 0 ? $d['accountid'] : 0);
+        if (!$flags['manual'] && $paid > 0) {
+            $type = dt_q($pdo, 'SELECT accounttype FROM accounts WHERE accountid = :id', ['id' => $newAccount])->fetchColumn();
+            if ($type === false) {
+                throw new DtFail('The selected account does not exist.', false, 'receivedinaccountid');
+            }
+            if ((string)$type !== 'Assets') {
+                throw new DtFail('The receiving account must be an Assets account.', false, 'receivedinaccountid');
+            }
+        }
+
+        /* Locks: livestock rows (old and new, ascending), then accounts (ascending). */
+        $animals = [];
+        if (!$locked) {
+            $first = [];
+            foreach ($lines as $k => $l) {
+                $first[$l['livestockid']] ??= $k + 1;
+            }
+            $ids = array_keys($first);
+            foreach ($old as $o) {
+                $ids[] = $o['livestockid'];
+            }
+            $animals = dt_lock_livestock_set($pdo, $ids, $first);
+        }
+        dt_lock_accounts($pdo, [$oldAccount, $newAccount]);
+
+        /* NEW: double entry accounts, validated on the server. An item already on the invoice keeps its old cost each. */
+        $costOf = [];
+        foreach ($old as $o) {
+            $costOf[$o['livestockid']] ??= $o['cost'];
+        }
+        $lineCosts = [];
+        foreach ($lines as $k => $l) {
+            $unit          = $costOf[$l['livestockid']] ?? (isset($animals[$l['livestockid']]) ? (string)$animals[$l['livestockid']]['costeach'] : '0');
+            $lineCosts[$k] = $l['qty'] * dt_decimal_to_minor((string)$unit, 2);
+        }
+        $acc = dt_sale_check_accounts($pdo, $d, $total, $paid, $lineCosts, !$locked);
+
+        /* Stock: put the old quantities back, then take the new ones out. */
+        if (!$locked) {
+            $available = [];
+            foreach ($animals as $lid => $a) {
+                $available[$lid] = (int)$a['stock'];
+            }
+            $back = [];
+            foreach ($old as $o) {
+                $back[$o['livestockid']] = ($back[$o['livestockid']] ?? 0) + $o['qty'];
+            }
+            foreach ($back as $lid => $qty) {
+                $available[$lid] += $qty;
+                if ($available[$lid] > DT_MAX_STOCK) {
+                    throw new DtFail('Cannot change this invoice: ' . $animals[$lid]['name'] . ' stock would exceed ' . number_format(DT_MAX_STOCK) . '.', false, 'lines');
+                }
+            }
+            $taken = dt_check_sale_stock($lines, $available, $animals);
+            ksort($available);
+            foreach ($available as $lid => $qty) {
+                $new = max(0, $qty - ($taken[$lid] ?? 0));
+                if ($new !== (int)$animals[$lid]['stock']) {
+                    dt_q($pdo, "UPDATE `{$s['table']}` SET `{$s['stock']}` = :q WHERE `{$s['id']}` = :id", ['q' => $new, 'id' => $lid]);
+                }
+            }
+        }
+
+        /* Header (with the three accounts). */
+        dt_q(
+            $pdo,
+            "UPDATE `{$v['table']}` SET `{$v['customerid']}` = :cus, `{$v['date']}` = :dt, `{$v['reference']}` = :ref, `{$v['total']}` = :tot,
+                    `{$v['paid']}` = :pd, `{$v['account']}` = :acc, `revenueaccountid` = :rev, `receivableaccountid` = :rec, `cogsaccountid` = :cg,
+                    `{$v['note']}` = :nt WHERE `{$v['id']}` = :id",
+            [
+                'cus' => $d['customerid'],
+                'dt'  => $d['date'],
+                'ref' => $d['reference'],
+                'tot' => dt_minor_to_decimal($total, 2),
+                'pd'  => dt_minor_to_decimal($paid, 2),
+                'acc' => $newAccount > 0 ? $newAccount : null,
+                'rev' => $acc['revenue'] > 0 ? $acc['revenue'] : null,
+                'rec' => $acc['receivable'] > 0 ? $acc['receivable'] : null,
+                'cg'  => $acc['cogs'] > 0 ? $acc['cogs'] : null,
+                'nt'  => $d['note'],
+                'id'  => $id,
+            ]
+        );
+
+        /* Lines: replaced only without returns/refunds (each with its inventory account). */
+        if (!$locked) {
+            dt_q($pdo, "DELETE FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id", ['id' => $id]);
+            $ins = $pdo->prepare(
+                "INSERT INTO `{$it['table']}` (`{$it['invoiceid']}`, `{$it['itemtype']}`, `{$it['livestockid']}`, `{$it['productid']}`, `{$it['quantity']}`, `{$it['priceeach']}`, `{$it['costeach']}`, `{$it['linetotal']}`, `inventoryaccountid`)
+                 VALUES (:p, 'Livestock', :l, NULL, :q, :u, :uc, :lt, :ia)"
+            );
+            foreach ($lines as $k => $l) {
+                $ins->execute([
+                    'p'  => $id,
+                    'l'  => $l['livestockid'],
+                    'q'  => $l['qty'],
+                    'u'  => dt_minor_to_decimal($l['price'], 2),
+                    'uc' => $costOf[$l['livestockid']] ?? (string)$animals[$l['livestockid']]['costeach'],
+                    'lt' => dt_minor_to_decimal($l['total'], 2),
+                    'ia' => $acc['lines'][$k] > 0 ? $acc['lines'][$k] : null,
+                ]);
+            }
+        }
+
+        /* Automatic receipt (skipped when receipts were entered on the Receipts page). */
+        if (!$flags['manual']) {
+            dt_sync_receipt($pdo, $id, $d['customerid'], $newAccount, $paid, $d['date']);
+
+            /* Balance rule: money taken out of an account must not make it negative. */
+            $changes = [];
+            if ($oldAccount > 0 && $oldPaid > 0) {
+                $changes[$oldAccount] = ($changes[$oldAccount] ?? 0) - $oldPaid;
+            }
+            if ($newAccount > 0 && $paid > 0) {
+                $changes[$newAccount] = ($changes[$newAccount] ?? 0) + $paid;
+            }
+            ksort($changes);
+            foreach ($changes as $aid => $change) {
+                if ($change >= 0) {
+                    continue;
+                }
+                $balance = dt_account_balances($pdo, $aid)[$aid] ?? 0;
+                if ($balance < 0) {
+                    $a2    = dt_q($pdo, 'SELECT code, accountname FROM accounts WHERE accountid = :id', ['id' => $aid])->fetch();
+                    $label = is_array($a2) ? (string)$a2['code'] . ' ' . (string)$a2['accountname'] : '#' . $aid;
+                    throw new DtFail('Insufficient balance in ' . $label . ': available ' . dt_format_minor($balance - $change) . ', required ' . dt_format_minor(-$change) . '.', false, 'paidamount');
+                }
+            }
+        }
+
+        /* Double entry: the old journal entry is replaced by the new one (accounts from the lines and header just saved). */
+        dt_journal_delete($pdo, 'sale', $id);
+        dt_journal_post(
+            $pdo,
+            'sale',
+            $id,
+            $d['date'],
+            'Sale #' . $id . ' ' . $customer,
+            dt_journal_sale_lines($total, $paid, (int)$newAccount, dt_invoice_cost_by_inventory($pdo, $id), $acc)
+        );
+
+        dt_log_sale($pdo, 'Update', 'Sale updated: #' . $id . ' ' . $customer);
+
+        return ['success' => true, 'message' => 'Invoice #' . $id . ' updated.', 'invoiceid' => $id];
+    });
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_act_saleupdate_old2(PDO $pdo): array
+{
+    $id = max(0, (int)($_POST['invoiceid'] ?? 0));
     $d  = dt_read_sale_input();
 
     return dt_transaction(static function (PDO $pdo) use ($id, $d): array {
@@ -4577,6 +5850,22 @@ function dt_act_saleupdate(PDO $pdo): array
                 }
             }
         }
+
+        /* Double entry: the old journal entry is replaced by the new one. Cost = quantity x cost each stored on the invoice lines. */
+        $costTotal = dt_sum_to_minor((string)dt_q(
+            $pdo,
+            "SELECT COALESCE(SUM(`{$it['quantity']}` * `{$it['costeach']}`), 0) FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id",
+            ['id' => $id]
+        )->fetchColumn());
+        dt_journal_delete($pdo, 'sale', $id);
+        dt_journal_post(
+            $pdo,
+            'sale',
+            $id,
+            $d['date'],
+            'Sale #' . $id . ' ' . $customer,
+            dt_journal_sale_lines($pdo, $total, $paid, (int)$newAccount, $costTotal)
+        );
 
         dt_log_sale($pdo, 'Update', 'Sale updated: #' . $id . ' ' . $customer);
 
@@ -5298,6 +6587,7 @@ function dt_act_invoicedelete(PDO $pdo): array
             dt_q($pdo, "DELETE FROM `{$rc['table']}` WHERE `{$rc['invoiceid']}` = :id", ['id' => $id]);
         }
         dt_q($pdo, "DELETE FROM `{$it['table']}` WHERE `{$it['invoiceid']}` = :id", ['id' => $id]);
+        dt_journal_delete($pdo, 'sale', $id);
         dt_q($pdo, "DELETE FROM `{$v['table']}` WHERE `{$v['id']}` = :id", ['id' => $id]);
 
         /* g. Balance rule: removing the receipt must not make the receiving account negative. */
@@ -5370,7 +6660,12 @@ function dt_handle_post(): never
         'stageupdate'         => 'dt_act_stageupdate',
         'stagedelete'         => 'dt_act_stagedelete',
         'supplierposition'     => 'dt_act_supplierposition',
+        'openingget'           => 'dt_act_openingget',
         'purchasecalc'         => 'dt_act_purchasecalc',
+        'purchaselookups'      => 'dt_act_purchaselookups_ja',
+        'purchaseeditlookups'  => 'dt_act_purchaseeditlookups_ja',
+        'salelookups'          => 'dt_act_salelookups_ja',
+        'saleeditlookups'      => 'dt_act_saleeditlookups_ja',
     ];
     $action   = (string)($_POST['action'] ?? '');
     if (!isset($handlers[$action])) {
@@ -5406,13 +6701,13 @@ function dt_handle_post(): never
             dt_json(['success' => false, 'blocked' => true, 'message' => 'Cannot delete: the ' . $noun . ' is used in other records.']);
         }
         if ($e->getCode() === '23000' && $action === 'livestockquicksave') {
-            dt_json(['success' => false, 'field' => 'name', 'message' => 'A livestock item named "' . trim((string)($_POST['name'] ?? '')) . '" already exists.']);
+            dt_json(['success' => false, 'field' => 'name', 'message' => 'A livestock item with this name, type and stage already exists.']);
         }
         if ($e->getCode() === '23000' && $action === 'delete') {
             dt_json(['success' => false, 'blocked' => true, 'message' => 'Cannot delete: the livestock item is used in other records.']);
         }
         if ($e->getCode() === '23000' && $action === 'save') {
-            dt_json(['success' => false, 'field' => 'name', 'message' => 'A livestock item with this name already exists.']);
+            dt_json(['success' => false, 'field' => 'name', 'message' => 'A livestock item with this name, type and stage already exists.']);
         }
         if (in_array($e->getCode(), ['23000', '45000'], true) && in_array($action, ['purchasesave', 'purchaseupdate'], true)) {
             dt_json(dt_fail('Cannot save: a supplier, account or livestock item of this purchase is missing or in use.'));
@@ -5506,7 +6801,7 @@ function dt_handle_post_old(): never
             dt_json(['success' => false, 'blocked' => true, 'message' => 'Cannot delete: the livestock item is used in other records.']);
         }
         if ($e->getCode() === '23000' && $action === 'save') {
-            dt_json(['success' => false, 'field' => 'name', 'message' => 'A livestock item with this name already exists.']);
+            dt_json(['success' => false, 'field' => 'name', 'message' => 'A livestock item with this name, type and stage already exists.']);
         }
         if (in_array($e->getCode(), ['23000', '45000'], true) && in_array($action, ['purchasesave', 'purchaseupdate'], true)) {
             dt_json(dt_fail('Cannot save: a supplier, account or livestock item of this purchase is missing or in use.'));
@@ -5896,6 +7191,66 @@ function dt_act_purchaseeditlookups(PDO $pdo): array
         throw new DtFail('Edit this purchase in Purchases page.', true);
     }
 
+    $i     = BF_PURCHASEITEMS;
+    $lines = [];
+    $held  = [];
+    foreach (dt_q(
+        $pdo,
+        "SELECT `{$i['livestockid']}` AS livestockid, `{$i['quantity']}` AS quantity, `{$i['purchasecost']}` AS purchasecost,
+                `{$i['priceeach']}` AS priceeach, `{$i['stockadded']}` AS stockadded
+           FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id AND `{$i['itemtype']}` = 'Livestock' ORDER BY `{$i['id']}` ASC",
+        ['id' => $id]
+    )->fetchAll() as $r) {
+        $lid        = (int)$r['livestockid'];
+        $held[$lid] = ($held[$lid] ?? 0) + (int)$r['stockadded'];
+        $lines[]    = [
+            'livestockid'  => $lid,
+            'quantity'     => (int)explode('.', (string)$r['quantity'])[0],
+            'purchasecost' => dt_signed_decimal(dt_sum_to_minor((string)$r['purchasecost'])),
+            'priceeach'    => dt_signed_decimal(dt_sum_to_minor((string)$r['priceeach'])),
+        ];
+    }
+    if ($lines === []) {
+        throw new DtFail('Edit this purchase in Purchases page.', true);
+    }
+
+    $pay  = dt_purchase_payments($pdo, $id);
+    $data = dt_act_purchaselookups($pdo)['data'];
+    foreach ($data['livestock'] as $k => $a) {
+        $lid = (int)$a['livestockid'];
+        if (isset($held[$lid])) {
+            $data['livestock'][$k]['currentstock'] = max(0, (int)$a['currentstock'] - $held[$lid]);
+        }
+    }
+    foreach ($data['accounts'] as $k => $a) {
+        if ($pay['account'] > 0 && (int)$a['accountid'] === $pay['account']) {
+            $data['accounts'][$k]['balance'] = dt_signed_decimal(dt_sum_to_minor((string)$a['balance']) + $pay['auto']);
+        }
+    }
+
+    return ['success' => true, 'data' => [
+        'suppliers' => $data['suppliers'],
+        'livestock' => $data['livestock'],
+        'accounts'  => $data['accounts'],
+        'purchase'  => $purchase,
+        'lines'     => $lines,
+        'manual'    => $pay['manual'],
+    ]];
+}
+
+/** Old one-line version, never called (delete it when you want). */
+function dt_act_purchaseeditlookups_v1(PDO $pdo): array
+{
+    $id  = max(0, (int)($_POST['purchaseid'] ?? 0));
+    $row = dt_q($pdo, dt_purchase_sql('WHERE p.`' . BF_PURCHASES['id'] . '` = :id'), ['id' => $id])->fetch();
+    if (!is_array($row)) {
+        throw new DtFail('Purchase not found.');
+    }
+    $purchase = dt_purchase_row($row);
+    if (!$purchase['editable']) {
+        throw new DtFail('Edit this purchase in Purchases page.', true);
+    }
+
     $i    = BF_PURCHASEITEMS;
     $line = dt_q(
         $pdo,
@@ -5947,6 +7302,388 @@ function dt_act_purchaseeditlookups(PDO $pdo): array
  * @throws DtFail On invalid input or a broken rule.
  */
 function dt_act_purchaseupdate(PDO $pdo): array
+{
+    $id = max(0, (int)($_POST['purchaseid'] ?? 0));
+    $d  = dt_add_purchase_accounts(dt_read_purchase_input()); // NEW
+
+    return dt_transaction(static function (PDO $pdo) use ($id, $d): array {
+        $p = BF_PURCHASES;
+        $i = BF_PURCHASEITEMS;
+        $s = BF_LIVESTOCK;
+
+        /* a. Lock the purchase and its lines. */
+        $head = dt_q(
+            $pdo,
+            "SELECT `{$p['paid']}` AS paidamount, `{$p['account']}` AS accountid FROM `{$p['table']}` WHERE `{$p['id']}` = :id FOR UPDATE",
+            ['id' => $id]
+        )->fetch();
+        if (!is_array($head)) {
+            throw new DtFail('Purchase not found.', false, 'purchaseid');
+        }
+        $old = dt_q(
+            $pdo,
+            "SELECT `{$i['itemtype']}` AS itemtype, `{$i['livestockid']}` AS livestockid, `{$i['stockadded']}` AS stockadded
+               FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id ORDER BY `{$i['id']}` ASC FOR UPDATE",
+            ['id' => $id]
+        )->fetchAll();
+        if ($old === []) {
+            throw new DtFail('Cannot change purchase #' . $id . ': edit this purchase in Purchases page.', true);
+        }
+        $back = [];
+        foreach ($old as $o) {
+            if ((string)$o['itemtype'] !== 'Livestock') {
+                throw new DtFail('Cannot change purchase #' . $id . ': edit this purchase in Purchases page.', true);
+            }
+            $lid        = (int)$o['livestockid'];
+            $back[$lid] = ($back[$lid] ?? 0) + (int)$o['stockadded'];
+        }
+        $oldPaid    = dt_sum_to_minor((string)$head['paidamount']);
+        $oldAccount = (int)($head['accountid'] ?? 0);
+        $pay        = dt_purchase_payments($pdo, $id);
+
+        /* b. Supplier (None is created once when needed). */
+        if ($d['nosupplier']) {
+            $d['supplierid'] = dt_none_supplier_id($pdo);
+        }
+        $supplier = dt_q($pdo, 'SELECT name FROM suppliers WHERE supplierid = :id', ['id' => $d['supplierid']])->fetchColumn();
+        if ($supplier === false) {
+            throw new DtFail('The selected supplier does not exist.', false, 'supplierid');
+        }
+        $supplier = (string)$supplier;
+
+        /* c. Payments entered on the Payments page: the paid amount cannot change here. */
+        if ($pay['manual'] && $d['paid'] !== $oldPaid) {
+            throw new DtFail('Cannot change the paid amount: this purchase has payments entered on the Payments page. Change those payments instead.', false, 'paidamount');
+        }
+        $newAccount   = $pay['manual'] ? $oldAccount : $d['accountid'];
+        $accountLabel = '';
+        if (!$pay['manual'] && $d['paid'] > 0) {
+            $account = dt_q($pdo, 'SELECT accounttype, code, accountname FROM accounts WHERE accountid = :id', ['id' => $d['accountid']])->fetch();
+            if (!is_array($account)) {
+                throw new DtFail('The selected account does not exist.', false, 'paidfromaccountid');
+            }
+            if ((string)$account['accounttype'] !== 'Assets') {
+                throw new DtFail('The paying account must be an Assets account.', false, 'paidfromaccountid');
+            }
+            $accountLabel = (string)$account['code'] . ' ' . (string)$account['accountname'];
+        }
+
+        $payableId = dt_purchase_check_accounts($pdo, $d); // NEW: server validation of the double entry accounts
+
+        /* d. Locks: livestock rows (old and new, ascending), then accounts (ascending). */
+        $first = [];
+        foreach ($d['lines'] as $k => $l) {
+            $first[$l['livestockid']] ??= $k + 1;
+        }
+        $ids = array_keys($first);
+        foreach (array_keys($back) as $lid) {
+            $ids[] = $lid;
+        }
+        $animals = dt_lock_livestock_set($pdo, $ids, $first);
+        dt_lock_accounts($pdo, [$oldAccount, $pay['account'], $newAccount]);
+
+        /* e. Stock: old animals out, new animals in (SUM per animal). */
+        $stock = [];
+        foreach ($animals as $lid => $a) {
+            $stock[$lid] = (int)$a['stock'];
+        }
+        foreach ($back as $lid => $qty) {
+            $stock[$lid] -= $qty;
+            if ($stock[$lid] < 0) {
+                throw new DtFail('Cannot change: ' . number_format(-$stock[$lid]) . ' animals of ' . $animals[$lid]['name'] . ' were already sold.', false, 'lines');
+            }
+        }
+        foreach ($d['lines'] as $k => $l) {
+            $lid          = $l['livestockid'];
+            $stock[$lid] += $l['qty'];
+            if ($stock[$lid] > DT_MAX_STOCK) {
+                throw new DtFail('Cannot purchase: ' . $animals[$lid]['name'] . ' stock would exceed ' . number_format(DT_MAX_STOCK) . '.', false, 'lines:' . ($k + 1) . ':quantity');
+            }
+        }
+
+        /* f. Balance rule: the automatic payment of this purchase is given back before the new one is checked. */
+        if (!$pay['manual'] && $d['paid'] > 0) {
+            $available = (dt_account_balances($pdo, $d['accountid'])[$d['accountid']] ?? 0) + ($pay['account'] === $d['accountid'] ? $pay['auto'] : 0);
+            if ($d['paid'] > $available) {
+                throw new DtFail(
+                    'Insufficient balance in ' . $accountLabel . ': available ' . dt_format_minor($available) . ', required ' . dt_format_minor($d['paid']) . '.',
+                    false,
+                    'paidamount'
+                );
+            }
+        }
+
+        /* g. Header (with the payable account), then the lines are replaced (each with its debit account). */
+        $accountValue = $pay['manual'] ? ($oldAccount > 0 ? $oldAccount : null) : ($d['paid'] > 0 ? $d['accountid'] : null);
+        dt_q(
+            $pdo,
+            "UPDATE `{$p['table']}` SET `{$p['supplierid']}` = :sup, `{$p['date']}` = :dt, `{$p['reference']}` = :ref, `{$p['total']}` = :tot,
+                    `{$p['paid']}` = :pd, `{$p['account']}` = :acc, `payableaccountid` = :pay, `{$p['note']}` = :nt WHERE `{$p['id']}` = :id",
+            [
+                'sup' => $d['supplierid'],
+                'dt'  => $d['date'],
+                'ref' => $d['reference'],
+                'tot' => dt_minor_to_decimal($d['total'], 2),
+                'pd'  => dt_minor_to_decimal($d['paid'], 2),
+                'acc' => $accountValue,
+                'pay' => $payableId > 0 ? $payableId : null,
+                'nt'  => $d['note'],
+                'id'  => $id,
+            ]
+        );
+        dt_q($pdo, "DELETE FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id", ['id' => $id]);
+        $ins = $pdo->prepare(
+            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['priceeach']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`, `debitaccountid`)
+             VALUES (:p, 'Livestock', :l, NULL, :q, :u, :sp, :lt, :sa, :da)"
+        );
+        foreach ($d['lines'] as $l) {
+            $ins->execute([
+                'p'  => $id,
+                'l'  => $l['livestockid'],
+                'q'  => dt_minor_to_decimal($l['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
+                'u'  => dt_minor_to_decimal($l['costeach'], 2),
+                'sp' => dt_minor_to_decimal($l['priceeach'], 2),
+                'lt' => dt_minor_to_decimal($l['purchasecost'], 2),
+                'sa' => $l['qty'],
+                'da' => $l['debit'],
+            ]);
+        }
+
+        /* h. Stock rows (ascending id order, same as the locks). */
+        ksort($stock);
+        foreach ($stock as $lid => $qty) {
+            if ($qty !== (int)$animals[$lid]['stock']) {
+                dt_q($pdo, "UPDATE `{$s['table']}` SET `{$s['stock']}` = :q WHERE `{$s['id']}` = :id", ['q' => $qty, 'id' => $lid]);
+            }
+        }
+
+        /* h1. Double entry: the old journal entry is replaced by the new one (same transaction). */
+        dt_journal_delete($pdo, 'purchase', $id);
+        dt_journal_post(
+            $pdo,
+            'purchase',
+            $id,
+            $d['date'],
+            'Purchase #' . $id . ' ' . $supplier,
+            dt_journal_purchase_lines($d['lines'], $d['paid'], (int)$newAccount, $payableId)
+        );
+
+        /* h2. The latest line of each animal decides its Cost Each and Price Each. */
+        $latest = [];
+        foreach ($d['lines'] as $l) {
+            $latest[$l['livestockid']] = $l;
+        }
+        ksort($latest);
+        foreach ($latest as $lid => $l) {
+            dt_q(
+                $pdo,
+                "UPDATE `{$s['table']}` SET `{$s['cost']}` = :c, `{$s['price']}` = :p WHERE `{$s['id']}` = :id",
+                ['c' => dt_minor_to_decimal($l['costeach'], 2), 'p' => dt_minor_to_decimal($l['priceeach'], 2), 'id' => $lid]
+            );
+        }
+
+        /* i. Automatic payment row (skipped when payments were entered on the Payments page). */
+        if (!$pay['manual']) {
+            dt_sync_payment($pdo, $id, $d['supplierid'], $d['accountid'], $d['paid'], $d['date']);
+        }
+
+        dt_log_purchase($pdo, 'Update', 'Purchase updated: #' . $id . ' ' . $supplier);
+
+        return ['success' => true, 'message' => 'Purchase #' . $id . ' updated.', 'purchaseid' => $id];
+    });
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_act_purchaseupdate_old2(PDO $pdo): array
+{
+    $id = max(0, (int)($_POST['purchaseid'] ?? 0));
+    $d  = dt_read_purchase_input();
+
+    return dt_transaction(static function (PDO $pdo) use ($id, $d): array {
+        $p = BF_PURCHASES;
+        $i = BF_PURCHASEITEMS;
+        $s = BF_LIVESTOCK;
+
+        /* a. Lock the purchase and its lines. */
+        $head = dt_q(
+            $pdo,
+            "SELECT `{$p['paid']}` AS paidamount, `{$p['account']}` AS accountid FROM `{$p['table']}` WHERE `{$p['id']}` = :id FOR UPDATE",
+            ['id' => $id]
+        )->fetch();
+        if (!is_array($head)) {
+            throw new DtFail('Purchase not found.', false, 'purchaseid');
+        }
+        $old = dt_q(
+            $pdo,
+            "SELECT `{$i['itemtype']}` AS itemtype, `{$i['livestockid']}` AS livestockid, `{$i['stockadded']}` AS stockadded
+               FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id ORDER BY `{$i['id']}` ASC FOR UPDATE",
+            ['id' => $id]
+        )->fetchAll();
+        if ($old === []) {
+            throw new DtFail('Cannot change purchase #' . $id . ': edit this purchase in Purchases page.', true);
+        }
+        $back = [];
+        foreach ($old as $o) {
+            if ((string)$o['itemtype'] !== 'Livestock') {
+                throw new DtFail('Cannot change purchase #' . $id . ': edit this purchase in Purchases page.', true);
+            }
+            $lid        = (int)$o['livestockid'];
+            $back[$lid] = ($back[$lid] ?? 0) + (int)$o['stockadded'];
+        }
+        $oldPaid    = dt_sum_to_minor((string)$head['paidamount']);
+        $oldAccount = (int)($head['accountid'] ?? 0);
+        $pay        = dt_purchase_payments($pdo, $id);
+
+        /* b. Supplier (None is created once when needed). */
+        if ($d['nosupplier']) {
+            $d['supplierid'] = dt_none_supplier_id($pdo);
+        }
+        $supplier = dt_q($pdo, 'SELECT name FROM suppliers WHERE supplierid = :id', ['id' => $d['supplierid']])->fetchColumn();
+        if ($supplier === false) {
+            throw new DtFail('The selected supplier does not exist.', false, 'supplierid');
+        }
+        $supplier = (string)$supplier;
+
+        /* c. Payments entered on the Payments page: the paid amount cannot change here. */
+        if ($pay['manual'] && $d['paid'] !== $oldPaid) {
+            throw new DtFail('Cannot change the paid amount: this purchase has payments entered on the Payments page. Change those payments instead.', false, 'paidamount');
+        }
+        $newAccount   = $pay['manual'] ? $oldAccount : $d['accountid'];
+        $accountLabel = '';
+        if (!$pay['manual'] && $d['paid'] > 0) {
+            $account = dt_q($pdo, 'SELECT accounttype, code, accountname FROM accounts WHERE accountid = :id', ['id' => $d['accountid']])->fetch();
+            if (!is_array($account)) {
+                throw new DtFail('The selected account does not exist.', false, 'paidfromaccountid');
+            }
+            if ((string)$account['accounttype'] !== 'Assets') {
+                throw new DtFail('The paying account must be an Assets account.', false, 'paidfromaccountid');
+            }
+            $accountLabel = (string)$account['code'] . ' ' . (string)$account['accountname'];
+        }
+
+        /* d. Locks: livestock rows (old and new, ascending), then accounts (ascending). */
+        $first = [];
+        foreach ($d['lines'] as $k => $l) {
+            $first[$l['livestockid']] ??= $k + 1;
+        }
+        $ids = array_keys($first);
+        foreach (array_keys($back) as $lid) {
+            $ids[] = $lid;
+        }
+        $animals = dt_lock_livestock_set($pdo, $ids, $first);
+        dt_lock_accounts($pdo, [$oldAccount, $pay['account'], $newAccount]);
+
+        /* e. Stock: old animals out, new animals in (SUM per animal). */
+        $stock = [];
+        foreach ($animals as $lid => $a) {
+            $stock[$lid] = (int)$a['stock'];
+        }
+        foreach ($back as $lid => $qty) {
+            $stock[$lid] -= $qty;
+            if ($stock[$lid] < 0) {
+                throw new DtFail('Cannot change: ' . number_format(-$stock[$lid]) . ' animals of ' . $animals[$lid]['name'] . ' were already sold.', false, 'lines');
+            }
+        }
+        foreach ($d['lines'] as $k => $l) {
+            $lid          = $l['livestockid'];
+            $stock[$lid] += $l['qty'];
+            if ($stock[$lid] > DT_MAX_STOCK) {
+                throw new DtFail('Cannot purchase: ' . $animals[$lid]['name'] . ' stock would exceed ' . number_format(DT_MAX_STOCK) . '.', false, 'lines:' . ($k + 1) . ':quantity');
+            }
+        }
+
+        /* f. Balance rule: the automatic payment of this purchase is given back before the new one is checked. */
+        if (!$pay['manual'] && $d['paid'] > 0) {
+            $available = (dt_account_balances($pdo, $d['accountid'])[$d['accountid']] ?? 0) + ($pay['account'] === $d['accountid'] ? $pay['auto'] : 0);
+            if ($d['paid'] > $available) {
+                throw new DtFail(
+                    'Insufficient balance in ' . $accountLabel . ': available ' . dt_format_minor($available) . ', required ' . dt_format_minor($d['paid']) . '.',
+                    false,
+                    'paidamount'
+                );
+            }
+        }
+
+        /* g. Header, then the lines are replaced. */
+        $accountValue = $pay['manual'] ? ($oldAccount > 0 ? $oldAccount : null) : ($d['paid'] > 0 ? $d['accountid'] : null);
+        dt_q(
+            $pdo,
+            "UPDATE `{$p['table']}` SET `{$p['supplierid']}` = :sup, `{$p['date']}` = :dt, `{$p['reference']}` = :ref, `{$p['total']}` = :tot,
+                    `{$p['paid']}` = :pd, `{$p['account']}` = :acc, `{$p['note']}` = :nt WHERE `{$p['id']}` = :id",
+            [
+                'sup' => $d['supplierid'],
+                'dt'  => $d['date'],
+                'ref' => $d['reference'],
+                'tot' => dt_minor_to_decimal($d['total'], 2),
+                'pd'  => dt_minor_to_decimal($d['paid'], 2),
+                'acc' => $accountValue,
+                'nt'  => $d['note'],
+                'id'  => $id,
+            ]
+        );
+        dt_q($pdo, "DELETE FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id", ['id' => $id]);
+        $ins = $pdo->prepare(
+            "INSERT INTO `{$i['table']}` (`{$i['purchaseid']}`, `{$i['itemtype']}`, `{$i['livestockid']}`, `{$i['productid']}`, `{$i['quantity']}`, `{$i['costeach']}`, `{$i['priceeach']}`, `{$i['purchasecost']}`, `{$i['stockadded']}`)
+             VALUES (:p, 'Livestock', :l, NULL, :q, :u, :sp, :lt, :sa)"
+        );
+        foreach ($d['lines'] as $l) {
+            $ins->execute([
+                'p'  => $id,
+                'l'  => $l['livestockid'],
+                'q'  => dt_minor_to_decimal($l['qty'] * (10 ** DT_QTY_SCALE), DT_QTY_SCALE),
+                'u'  => dt_minor_to_decimal($l['costeach'], 2),
+                'sp' => dt_minor_to_decimal($l['priceeach'], 2),
+                'lt' => dt_minor_to_decimal($l['purchasecost'], 2),
+                'sa' => $l['qty'],
+            ]);
+        }
+
+        /* h. Stock rows (ascending id order, same as the locks). */
+        ksort($stock);
+        foreach ($stock as $lid => $qty) {
+            if ($qty !== (int)$animals[$lid]['stock']) {
+                dt_q($pdo, "UPDATE `{$s['table']}` SET `{$s['stock']}` = :q WHERE `{$s['id']}` = :id", ['q' => $qty, 'id' => $lid]);
+            }
+        }
+
+        /* h1. Double entry: the old journal entry is replaced by the new one (same transaction). */
+        dt_journal_delete($pdo, 'purchase', $id);
+        dt_journal_post(
+            $pdo,
+            'purchase',
+            $id,
+            $d['date'],
+            'Purchase #' . $id . ' ' . $supplier,
+            dt_journal_purchase_lines($pdo, $d['total'], $d['paid'], (int)$newAccount)
+        );
+
+        /* h2. The latest line of each animal decides its Cost Each and Price Each. */
+        $latest = [];
+        foreach ($d['lines'] as $l) {
+            $latest[$l['livestockid']] = $l;
+        }
+        ksort($latest);
+        foreach ($latest as $lid => $l) {
+            dt_q(
+                $pdo,
+                "UPDATE `{$s['table']}` SET `{$s['cost']}` = :c, `{$s['price']}` = :p WHERE `{$s['id']}` = :id",
+                ['c' => dt_minor_to_decimal($l['costeach'], 2), 'p' => dt_minor_to_decimal($l['priceeach'], 2), 'id' => $lid]
+            );
+        }
+
+        /* i. Automatic payment row (skipped when payments were entered on the Payments page). */
+        if (!$pay['manual']) {
+            dt_sync_payment($pdo, $id, $d['supplierid'], $d['accountid'], $d['paid'], $d['date']);
+        }
+
+        dt_log_purchase($pdo, 'Update', 'Purchase updated: #' . $id . ' ' . $supplier);
+
+        return ['success' => true, 'message' => 'Purchase #' . $id . ' updated.', 'purchaseid' => $id];
+    });
+}
+
+/** Old one-line version, never called (delete it when you want). */
+function dt_act_purchaseupdate_v1(PDO $pdo): array
 {
     $id = max(0, (int)($_POST['purchaseid'] ?? 0));
     $d  = dt_read_purchase_input();
@@ -6160,6 +7897,7 @@ function dt_act_purchasedelete(PDO $pdo): array
         }
 
         dt_sync_payment($pdo, $id, 0, 0, 0, '');
+        dt_journal_delete($pdo, 'purchase', $id);
         dt_q($pdo, "DELETE FROM `{$i['table']}` WHERE `{$i['purchaseid']}` = :id", ['id' => $id]);
         dt_q($pdo, "DELETE FROM `{$p['table']}` WHERE `{$p['id']}` = :id", ['id' => $id]);
 
@@ -6207,6 +7945,16 @@ function dt_act_customerposition(PDO $pdo): array
  * @return array<string,mixed> Payload.
  */
 function dt_act_livestocklookups(PDO $pdo): array
+{
+    return ['success' => true, 'data' => [
+        'types'     => dt_lookup_usage_rows($pdo, BF_LIVESTOCKTYPES, BF_LIVESTOCK['type']),
+        'stages'    => dt_lookup_usage_rows($pdo, BF_LIVESTOCKSTAGES, BF_LIVESTOCK['stage']),
+        'jaccounts' => dt_lookup_journal_accounts($pdo),
+    ]];
+}
+
+/** Old version, never called. */
+function dt_act_livestocklookups_old2(PDO $pdo): array
 {
     return ['success' => true, 'data' => [
         'types'    => dt_lookup_usage_rows($pdo, BF_LIVESTOCKTYPES, BF_LIVESTOCK['type']),
@@ -6437,7 +8185,7 @@ function dt_act_livestockquicksave(PDO $pdo): array
 
     return dt_transaction(static function (PDO $pdo) use ($name, $type, $stage, $cost, $price): array {
         $s = BF_LIVESTOCK;
-        dt_assert_unique_name($pdo, $name, 0);
+        dt_assert_unique_name($pdo, $name, $type, $stage, 0);
         $type  = dt_assert_lookup_exists($pdo, BF_LIVESTOCKTYPES, $type, 'type', 'Select a valid type.');
         $stage = dt_assert_lookup_exists($pdo, BF_LIVESTOCKSTAGES, $stage, 'stage', 'Select a valid stage.');
         dt_q(
@@ -6483,7 +8231,7 @@ function dt_act_livestockquicksave_oldstatus(PDO $pdo): array
 
     return dt_transaction(static function (PDO $pdo) use ($name, $type, $status, $cost, $price): array {
         $s = BF_LIVESTOCK;
-        dt_assert_unique_name($pdo, $name, 0);
+        dt_assert_unique_name($pdo, $name, $type, $stage, 0);
         $type   = dt_assert_lookup_exists($pdo, BF_LIVESTOCKTYPES, $type, 'type', 'Select a valid type.');
         $status = dt_assert_lookup_exists($pdo, BF_LIVESTOCKSTAGES, $status, 'status', 'Select a valid status.');
         dt_q(
@@ -7203,6 +8951,21 @@ function dt_modal_livestock(): void
               <div class="invalid-feedback" id="lpriceeachFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
           </div>
+          <div id="lOpeningWrap" hidden>
+            <div class="alert alert-info py-2 mb-3" id="lOpeningInfo" role="status" aria-live="polite"></div>
+            <div class="form-row">
+              <div class="form-group col-sm-6">
+                <label for="lInvAccount">Inventory Account (Debit) <span class="req" id="lInvReq">*</span></label>
+                <select class="form-control" id="lInvAccount" aria-describedby="lInvAccountFb"><option value="">Select account</option></select>
+                <div class="invalid-feedback" id="lInvAccountFb" data-default="Select the Inventory (debit) account.">Select the Inventory (debit) account.</div>
+              </div>
+              <div class="form-group col-sm-6">
+                <label for="lEquityAccount">Opening Balance / Equity (Credit) <span class="req" id="lEqReq">*</span></label>
+                <select class="form-control" id="lEquityAccount" aria-describedby="lEquityAccountFb"><option value="">Select account</option></select>
+                <div class="invalid-feedback" id="lEquityAccountFb" data-default="Select the Opening Balance / Equity (credit) account.">Select the Opening Balance / Equity (credit) account.</div>
+              </div>
+            </div>
+          </div>
           <div class="form-group mb-0">
             <label for="lStage">Stage <span class="req">*</span></label>
             <div class="input-group">
@@ -7287,6 +9050,21 @@ function dt_modal_livestock_old(): void
               <div class="invalid-feedback" id="lpriceeachFb">Price Each must be 0 or more, with up to 2 decimals.</div>
             </div>
           </div>
+          <div id="lOpeningWrap" hidden>
+            <div class="alert alert-info py-2 mb-3" id="lOpeningInfo" role="status" aria-live="polite"></div>
+            <div class="form-row">
+              <div class="form-group col-sm-6">
+                <label for="lInvAccount">Inventory Account (Debit) <span class="req" id="lInvReq">*</span></label>
+                <select class="form-control" id="lInvAccount" aria-describedby="lInvAccountFb"><option value="">Select account</option></select>
+                <div class="invalid-feedback" id="lInvAccountFb" data-default="Select the Inventory (debit) account.">Select the Inventory (debit) account.</div>
+              </div>
+              <div class="form-group col-sm-6">
+                <label for="lEquityAccount">Opening Balance / Equity (Credit) <span class="req" id="lEqReq">*</span></label>
+                <select class="form-control" id="lEquityAccount" aria-describedby="lEquityAccountFb"><option value="">Select account</option></select>
+                <div class="invalid-feedback" id="lEquityAccountFb" data-default="Select the Opening Balance / Equity (credit) account.">Select the Opening Balance / Equity (credit) account.</div>
+              </div>
+            </div>
+          </div>
           <div class="form-group mb-0">
             <label for="lStage">Stage <span class="req">*</span></label>
             <input type="text" class="form-control" id="lStage" maxlength="<?= DT_MAX_STAGE ?>" value="Active" required aria-describedby="lStageFb">
@@ -7309,6 +9087,202 @@ function dt_modal_livestock_old(): void
  * @return void
  */
 function dt_modal_purchase(): void
+{
+    ?>
+  <div class="modal fade" id="purchaseModal" tabindex="-1" role="dialog" aria-labelledby="purchaseModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable" role="document">
+      <form class="modal-content" id="purchaseForm" novalidate autocomplete="off">
+        <div class="modal-header">
+          <h5 class="modal-title" id="purchaseModalTitle">Purchase Livestock</h5>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+        </div>
+        <div class="modal-body">
+          <div class="form-grid sale-head">
+            <div class="form-group">
+              <label for="puSupplier">Supplier <span class="req">*</span></label>
+              <div class="input-group">
+                <select class="form-control" id="puSupplier" required aria-describedby="puSupplierHelp puSupplierFb qspOk">
+                  <option value="">Select supplier</option>
+                </select>
+                <div class="input-group-append">
+                  <button type="button" class="btn btn-quick-add" id="btnQspAdd" aria-expanded="false" aria-controls="qspPanel" aria-label="Add new supplier" title="Add new supplier"><i class="fas fa-plus" aria-hidden="true"></i></button>
+                </div>
+                <div class="invalid-feedback" id="puSupplierFb">Supplier is required.</div>
+              </div>
+              <div class="helper-line" id="puSupplierHelp" aria-live="polite"></div>
+              <div class="quick-ok" id="qspOk" role="status" aria-live="polite"></div>
+              <div class="helper-line cust-pos" id="puSupPos" aria-live="polite" hidden></div>
+            </div>
+            <div class="form-group">
+              <label for="puDate">Purchase Date <span class="req">*</span></label>
+              <input type="date" class="form-control" id="puDate" required aria-describedby="puDateFb">
+              <div class="invalid-feedback" id="puDateFb">Purchase date must be a valid date.</div>
+            </div>
+            <div class="form-group">
+              <label for="puRef">Reference</label>
+              <input type="text" class="form-control" id="puRef" maxlength="<?= DT_MAX_REFERENCE ?>" aria-describedby="puRefHelp puRefFb">
+              <div class="helper-line" id="puRefHelp">Supplier invoice number.</div>
+              <div class="invalid-feedback" id="puRefFb">Reference is too long.</div>
+            </div>
+            <div class="quick-panel" id="qspPanel" role="group" aria-labelledby="qspTitle" hidden>
+              <div class="quick-title" id="qspTitle">New supplier</div>
+              <div class="quick-grid">
+                <div class="form-group">
+                  <label for="qspName">Supplier name <span class="req">*</span></label>
+                  <input type="text" class="form-control" id="qspName" maxlength="<?= DT_MAX_NAME ?>" aria-describedby="qspNameFb">
+                  <div class="invalid-feedback" id="qspNameFb" data-default="Supplier name is required.">Supplier name is required.</div>
+                </div>
+                <div class="form-group">
+                  <label for="qspContact">Contact</label>
+                  <input type="text" class="form-control" id="qspContact" maxlength="<?= DT_MAX_CONTACT ?>" aria-describedby="qspContactFb">
+                  <div class="invalid-feedback" id="qspContactFb" data-default="Contact is too long (maximum <?= DT_MAX_CONTACT ?> characters).">Contact is too long (maximum <?= DT_MAX_CONTACT ?> characters).</div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="qspAddress">Address</label>
+                <input type="text" class="form-control" id="qspAddress" maxlength="<?= DT_MAX_ADDRESS ?>" aria-describedby="qspAddressFb">
+                <div class="invalid-feedback" id="qspAddressFb" data-default="Address is too long (maximum <?= DT_MAX_ADDRESS ?> characters).">Address is too long (maximum <?= DT_MAX_ADDRESS ?> characters).</div>
+              </div>
+              <div class="quick-actions">
+                <button type="button" class="btn btn-success btn-sm btn-quick-save" id="btnQspSave"><i class="fas fa-check mr-1" aria-hidden="true"></i> Save</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="btnQspCancel">Cancel</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="puPaid">Paid Amount ($)</label>
+              <input type="number" class="form-control" id="puPaid" min="0" max="999999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="puPaidFb">
+              <div class="invalid-feedback" id="puPaidFb">Paid amount must be 0 or more, with up to 2 decimals.</div>
+            </div>
+            <div class="form-group">
+              <label for="puAccount">Paid From Account <span class="req" id="puAccountReq" hidden>*</span></label>
+              <select class="form-control" id="puAccount" aria-describedby="puAccountHelp puAccountFb">
+                <option value="">Select account</option>
+              </select>
+              <div class="helper-line" id="puAccountHelp" aria-live="polite"></div>
+              <div class="invalid-feedback" id="puAccountFb">Select the account the payment came from.</div>
+            </div>
+            <div class="form-group">
+              <label for="puNote">Note</label>
+              <input type="text" class="form-control" id="puNote" maxlength="<?= DT_MAX_NOTE ?>" aria-describedby="puNoteFb">
+              <div class="invalid-feedback" id="puNoteFb">Note is too long.</div>
+            </div>
+          </div>
+
+          <div class="lines-head">
+            <h6 class="lines-title" id="puLinesHeading">Lines</h6>
+            <div>
+              <button type="button" class="btn btn-quick-add btn-sm" id="btnQlvAdd" aria-expanded="false" aria-controls="qlvPanel"><i class="fas fa-plus mr-1" aria-hidden="true"></i> New livestock</button>
+              <button type="button" class="btn btn-primary btn-sm" id="btnAddPurchaseLine"><i class="fas fa-plus mr-1" aria-hidden="true"></i> Add line</button>
+            </div>
+          </div>
+          <div class="quick-panel" id="qlvPanel" role="group" aria-labelledby="qlvTitle" hidden>
+            <div class="quick-title" id="qlvTitle">New livestock (stock starts at 0, this purchase adds it)</div>
+            <div class="form-group">
+              <label for="qlvName">Livestock name <span class="req">*</span></label>
+              <input type="text" class="form-control" id="qlvName" maxlength="<?= DT_MAX_NAME ?>" aria-describedby="qlvNameFb">
+              <div class="invalid-feedback" id="qlvNameFb" data-default="Name is required.">Name is required.</div>
+            </div>
+            <div class="quick-grid">
+              <div class="form-group">
+                <label for="qlvType">Type <span class="req">*</span></label>
+                <div class="input-group">
+                  <select class="form-control" id="qlvType" aria-describedby="qlvTypeFb qptOk">
+                    <option value="">Select type</option>
+                  </select>
+                  <div class="input-group-append">
+                    <button type="button" class="btn btn-quick-add" id="btnQptAdd" aria-expanded="false" aria-controls="qptPanel" aria-label="Add new type" title="Add new type"><i class="fas fa-plus" aria-hidden="true"></i></button>
+                  </div>
+                  <div class="invalid-feedback" id="qlvTypeFb" data-default="Select a valid type.">Select a valid type.</div>
+                </div>
+                <div class="quick-ok" id="qptOk" role="status" aria-live="polite"></div>
+                <div class="quick-panel" id="qptPanel" role="group" aria-labelledby="qptTitle" hidden>
+                  <div class="quick-title" id="qptTitle">New type</div>
+                  <div class="form-group">
+                    <label for="qptName">Type name <span class="req">*</span></label>
+                    <input type="text" class="form-control" id="qptName" maxlength="<?= DT_MAX_TYPE ?>" aria-describedby="qptNameFb">
+                    <div class="invalid-feedback" id="qptNameFb" data-default="Type name is required.">Type name is required.</div>
+                  </div>
+                  <div class="quick-actions">
+                    <button type="button" class="btn btn-success btn-sm btn-quick-save" id="btnQptSave"><i class="fas fa-check mr-1" aria-hidden="true"></i> Save</button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btnQptCancel">Cancel</button>
+                  </div>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="qlvStage">Stage <span class="req">*</span></label>
+                <div class="input-group">
+                  <select class="form-control" id="qlvStage" aria-describedby="qlvStageFb QpgOk">
+                    <option value="">Select stage</option>
+                  </select>
+                  <div class="input-group-append">
+                    <button type="button" class="btn btn-quick-add" id="btnQpgAdd" aria-expanded="false" aria-controls="QpgPanel" aria-label="Add new stage" title="Add new stage"><i class="fas fa-plus" aria-hidden="true"></i></button>
+                  </div>
+                  <div class="invalid-feedback" id="qlvStageFb" data-default="Select a valid stage.">Select a valid stage.</div>
+                </div>
+                <div class="quick-ok" id="QpgOk" role="status" aria-live="polite"></div>
+                <div class="quick-panel" id="QpgPanel" role="group" aria-labelledby="QpgTitle" hidden>
+                  <div class="quick-title" id="QpgTitle">New stage</div>
+                  <div class="form-group">
+                    <label for="QpgName">Stage name <span class="req">*</span></label>
+                    <input type="text" class="form-control" id="QpgName" maxlength="<?= DT_MAX_STAGE ?>" aria-describedby="QpgNameFb">
+                    <div class="invalid-feedback" id="QpgNameFb" data-default="Stage name is required.">Stage name is required.</div>
+                  </div>
+                  <div class="quick-actions">
+                    <button type="button" class="btn btn-success btn-sm btn-quick-save" id="btnQpgSave"><i class="fas fa-check mr-1" aria-hidden="true"></i> Save</button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btnQpgCancel">Cancel</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="quick-actions">
+              <button type="button" class="btn btn-success btn-sm btn-quick-save" id="btnQlvSave"><i class="fas fa-check mr-1" aria-hidden="true"></i> Save</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="btnQlvCancel">Cancel</button>
+            </div>
+          </div>
+          <div class="quick-ok" id="qlvOk" role="status" aria-live="polite"></div>
+
+          <div class="table-scroll sale-lines-scroll">
+            <table class="table table-bordered lines-table" aria-labelledby="puLinesHeading">
+              <thead>
+                <tr>
+                  <th>Livestock</th>
+                  <th class="w-qty">Quantity</th>
+                  <th class="w-price">Purchase Cost ($)</th>
+                  <th class="w-price">Cost Each ($)</th>
+                  <th class="w-price">Price Each ($)</th>
+                  <th class="w-rm text-center"><span class="sr-only">Remove</span></th>
+                </tr>
+              </thead>
+              <tbody id="puLinesBody"></tbody>
+            </table>
+          </div>
+          <div class="invalid-feedback d-block" id="puLinesFb" role="alert" hidden>Add at least one line.</div>
+          <div class="form-group mt-3">
+            <label for="puPayable">Credit Account for the Unpaid Part (Accounts Payable)</label>
+            <select class="form-control" id="puPayable" aria-describedby="puPayableHelp puPayableFb">
+              <option value="">Select account</option>
+            </select>
+            <div class="helper-line" id="puPayableHelp">Credited with the balance due. Required when the purchase is not paid in full. The Paid From account credits the paid part.</div>
+            <div class="invalid-feedback" id="puPayableFb">Select the Accounts Payable (credit) account for the unpaid part.</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <div class="totals-box" aria-live="polite">
+            <div>Purchase Cost: <strong id="puFootPurchaseCost">$0.00</strong></div>
+            <div>Paid: <strong id="puFootPaid">$0.00</strong></div>
+            <div>Balance due: <strong id="puFootBalance">$0.00</strong></div>
+          </div>
+          <button type="submit" class="btn btn-success btn-sm" id="btnSavePurchase"><i class="fas fa-check mr-1" aria-hidden="true"></i> Submit</button>
+          <button type="button" class="btn btn-danger btn-sm" data-dismiss="modal">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+<?php
+}
+
+/** Old one-line modal, never called (delete it when you want). */
+function dt_modal_purchase_v1(): void
 {
     ?>
   <div class="modal fade" id="purchaseModal" tabindex="-1" role="dialog" aria-labelledby="purchaseModalTitle" aria-hidden="true">
@@ -7658,6 +9632,21 @@ function dt_modal_sale(): void
               <label for="saRef">Reference</label>
               <input type="text" class="form-control" id="saRef" maxlength="<?= DT_MAX_REFERENCE ?>" aria-describedby="saRefFb">
               <div class="invalid-feedback" id="saRefFb">Reference is too long.</div>
+            </div>
+            <div class="form-group">
+              <label for="saRevenue">Credit Account: Sales Revenue <span class="req">*</span></label>
+              <select class="form-control" id="saRevenue" aria-describedby="saRevenueFb"><option value="">Select account</option></select>
+              <div class="invalid-feedback" id="saRevenueFb">Select the Sales Revenue (credit) account.</div>
+            </div>
+            <div class="form-group">
+              <label for="saReceivable">Debit Account: Receivable (unpaid part)</label>
+              <select class="form-control" id="saReceivable" aria-describedby="saReceivableFb"><option value="">Select account</option></select>
+              <div class="invalid-feedback" id="saReceivableFb">Select the Accounts Receivable (debit) account for the unpaid part.</div>
+            </div>
+            <div class="form-group">
+              <label for="saCogs">Debit Account: Cost of Goods Sold</label>
+              <select class="form-control" id="saCogs" aria-describedby="saCogsFb"><option value="">Select account</option></select>
+              <div class="invalid-feedback" id="saCogsFb">Select the Cost of Goods Sold (debit) account.</div>
             </div>
             <div class="quick-panel" id="qcsPanel" role="group" aria-labelledby="qcsTitle" hidden>
               <div class="quick-title" id="qcsTitle">New customer</div>
@@ -9080,6 +11069,21 @@ $n         = dt_n();
     }
 
     // Valid money text: up to 7 digits, up to 2 decimals
+    var JA = { lists: { assets: [], liability: [], revenue: [], expense: [] }, defaults: {} };
+    function jaTake(src) { if (src && src.jaccounts) { JA = src.jaccounts; } }
+    function jaOpts(key, placeholder) {
+      var h = '<option value="">' + esc(placeholder) + '</option>';
+      $.each(JA.lists[key] || [], function (i, r) { h += '<option value="' + Number(r.accountid) + '">' + esc(r.code + ' ' + r.accountname) + '</option>'; });
+      return h;
+    }
+    // select "wanted" (account id), else "fallback", else nothing
+    function jaSet(sel, wanted, fallback) {
+      var $s = $(sel), v = String(Number(wanted) > 0 ? wanted : (Number(fallback) > 0 ? fallback : ''));
+      $s.val(v);
+      if ($s.val() === null) { $s.val(''); }
+    }
+    function jaFill(sel, key, placeholder, wanted, fallback) { $(sel).html(jaOpts(key, placeholder)); jaSet(sel, wanted, fallback); }
+
     function validMoney(v) {
       return /^\d{1,7}(\.\d{1,2})?$/.test(v);
     }
@@ -9893,7 +11897,7 @@ $n         = dt_n();
     function lslLoad(force) {
       if (LSL.loaded && !force) { return $.Deferred().resolve().promise(); }
       return api({ action: 'livestocklookups' }).done(function (res) {
-        if (res.success) { LSL.types = res.data.types; LSL.stages = res.data.stages; LSL.loaded = true; }
+        if (res.success) { LSL.types = res.data.types; LSL.stages = res.data.stages; if (res.data.jaccounts) { jaTake(res.data); } LSL.loaded = true; }
         else { toastr.error(res.message); }
       });
     }
@@ -10027,6 +12031,131 @@ $n         = dt_n();
       }
     };
     quickWire(Qsg);
+</script>
+
+<!-- ===================== Opening stock accounts: Add / Edit Livestock (overrides the old opener and submit) ===================== -->
+<script nonce="<?= $n ?>">
+    var lvEditing = false, lvHadOpening = false;
+
+    // Opening value = stock x cost each, exact (BigInt minor units)
+    function lvOpeningValue() {
+      var stock = $.trim($('#lStock').val()), cost = $.trim($('#lCostEach').val());
+      if (!/^\d+$/.test(stock) || !validMoney(cost)) { return 0n; }
+      return BigInt(stock) * toMinor(cost, 2);
+    }
+
+    function lvOpeningRefresh() {
+      var v = lvOpeningValue(), show = v > 0n;
+      var optional = lvEditing && !lvHadOpening;   // item without an opening entry: accounts are optional
+      $('#lOpeningWrap').prop('hidden', false);
+      $('#lInvReq, #lEqReq').prop('hidden', optional);
+      $('#lOpeningInfo').text(show
+        ? 'Opening value (cost each x current stock): ' + minorMoney(v) + (optional
+            ? '. Optional for this item: leave both accounts empty to post nothing.'
+            : '. Posted as Debit Inventory and Credit Opening Balance / Equity.')
+        : '');
+    }
+
+    function clearInvalid() {
+      $('#lName, #lType, #lStock, #lCostEach, #lpriceeach, #lStage, #lInvAccount, #lEquityAccount').removeClass('is-invalid');
+      $('#lNameFb').text(LV_NAME_REQ);
+      $('#lTypeFb').text(LV_TYPE_REQ);
+      $('#lStockFb').text(LV_STOCK_MSG);
+      $('#lCostEachFb').text(LV_COST_MSG);
+      $('#lpriceeachFb').text(LV_PRICE_MSG);
+      $('#lStageFb').text(LV_STAGE_REQ);
+      $('#lInvAccountFb').text($('#lInvAccountFb').attr('data-default'));
+      $('#lEquityAccountFb').text($('#lEquityAccountFb').attr('data-default'));
+    }
+
+    function openLivestockModal(d) {
+      if (lvOpening) { return; }
+      lvOpening = true;
+      lslLoad(true).done(function () {
+        var op = d ? api({ action: 'openingget', livestockid: d.livestockid })
+                   : $.Deferred().resolve({ success: true, data: { has: false, inv: 0, eq: 0 } }).promise();
+        op.done(function (res) {
+          if (!res.success) { return; }
+          $('#livestockForm')[0].reset();
+          clearInvalid();
+          qpResetModal('#livestockModal');
+          lvEditing = !!d;
+          lvHadOpening = !!res.data.has;
+          $('#lId').val(d ? d.livestockid : 0);
+          $('#lName').val(d ? d.name : '');
+          lslFill('#lType', LSL.types, 'Select type', d ? d.type : '');
+          lslFill('#lStage', LSL.stages, 'Select stage', d ? d.stage : 'Active');
+          $('#lStock').val(d ? d.currentstock : 0);
+          $('#lCostEach').val(d ? d.costeach : '0.00');
+          $('#lpriceeach').val(d ? d.priceeach : '0.00');   // fixed: the old code wrote to #lPriceEach (wrong case), so Edit showed 0.00
+          jaFill('#lInvAccount', 'assets', 'Select account', res.data.inv, d ? 0 : JA.defaults.inventory);
+          jaFill('#lEquityAccount', 'equity', 'Select account', res.data.eq, d ? 0 : JA.defaults.equity);
+          lvOpeningRefresh();
+          $('#livestockModalTitle').text(d ? 'Edit Livestock' : 'Add Livestock');
+          $('#livestockModal').modal('show');
+        }).always(function () { lvOpening = false; });
+      }).fail(function () { lvOpening = false; });
+    }
+
+    $('#lType, #lStage, #lInvAccount, #lEquityAccount').on('change', function () { $(this).removeClass('is-invalid'); });
+    $('#lStock, #lCostEach').on('input', lvOpeningRefresh);
+
+    $('#livestockForm').off('submit').on('submit', function (e) {
+      e.preventDefault();
+      clearInvalid();
+
+      var name  = $.trim($('#lName').val());
+      var type  = $.trim($('#lType').val() || '');
+      var stock = $.trim($('#lStock').val());
+      var cost  = $.trim($('#lCostEach').val());
+      var price = $.trim($('#lpriceeach').val());
+      var stage = $.trim($('#lStage').val() || '');
+      if (name === '') { $('#lName').addClass('is-invalid').trigger('focus'); return; }
+      if (type === '') { $('#lType').addClass('is-invalid').trigger('focus'); return; }
+      if (!/^\d+$/.test(stock) || Number(stock) > CFG.maxStock) { $('#lStock').addClass('is-invalid').trigger('focus'); return; }
+      if (!validMoney(cost)) { $('#lCostEach').addClass('is-invalid').trigger('focus'); return; }
+      if (!validMoney(price)) { $('#lpriceeach').addClass('is-invalid').trigger('focus'); return; }
+      if (stage === '') { $('#lStage').addClass('is-invalid').trigger('focus'); return; }
+
+      // Opening accounts: required when stock x cost > 0 (optional when editing an item that has no opening entry)
+      var inv = '', eq = '';
+      if (lvOpeningValue() > 0n) {
+        inv = $('#lInvAccount').val() || '';
+        eq  = $('#lEquityAccount').val() || '';
+        var need = !(lvEditing && !lvHadOpening) || inv !== '' || eq !== '';
+        if (need && inv === '') { $('#lInvAccount').addClass('is-invalid').trigger('focus'); return; }
+        if (need && eq === '')  { $('#lEquityAccount').addClass('is-invalid').trigger('focus'); return; }
+      }
+
+      var $btn = $('#btnSaveLivestock').prop('disabled', true);
+      api({
+        action: 'save',
+        livestockid: $('#lId').val(),
+        name: name,
+        type: type,
+        currentstock: stock,
+        costeach: cost,
+        priceeach: price,
+        stage: stage,
+        inventoryaccountid: inv || 0,
+        equityaccountid: eq || 0
+      }).done(function (res) {
+        if (res.success) {
+          toastr.success(res.message);
+          $('#livestockModal').modal('hide');
+          table.ajax.reload(null, false);
+          return;
+        }
+        var map = { name: ['#lName', '#lNameFb'], type: ['#lType', '#lTypeFb'], currentstock: ['#lStock', '#lStockFb'],
+                    costeach: ['#lCostEach', '#lCostEachFb'], priceeach: ['#lpriceeach', '#lpriceeachFb'], stage: ['#lStage', '#lStageFb'],
+                    inventoryaccountid: ['#lInvAccount', '#lInvAccountFb'], equityaccountid: ['#lEquityAccount', '#lEquityAccountFb'] };
+        if (map[res.field]) {
+          $(map[res.field][1]).text(res.message);
+          $(map[res.field][0]).addClass('is-invalid').trigger('focus');
+        }
+        toastr.error(res.message);
+      }).always(function () { $btn.prop('disabled', false); });
+    });
 </script>
 
 <!-- ===================== Manage types and statuses: list, rename, delete (inline panels) ===================== -->
@@ -10273,7 +12402,14 @@ $n         = dt_n();
     };
     var SA_DEFAULTS = {};
     $.each(SA_FIELDS, function (key, pair) { SA_DEFAULTS[key] = $(pair[1]).text(); });
-    var SA_LINE_KEYS = { livestock: '.sl-livestock', quantity: '.sl-qty', priceeach: '.sl-price' };
+    var SA_LINE_KEYS = { livestock: '.sl-livestock', quantity: '.sl-qty', priceeach: '.sl-price', inventory: '.sl-inv' };
+    SA_FIELDS.revenueaccountid    = ['#saRevenue',    '#saRevenueFb'];    SA_DEFAULTS.revenueaccountid    = $('#saRevenueFb').text();
+    SA_FIELDS.receivableaccountid = ['#saReceivable', '#saReceivableFb']; SA_DEFAULTS.receivableaccountid = $('#saReceivableFb').text();
+    SA_FIELDS.cogsaccountid       = ['#saCogs',       '#saCogsFb'];       SA_DEFAULTS.cogsaccountid       = $('#saCogsFb').text();
+    $('#saRevenue, #saReceivable, #saCogs').on('change', function () {
+      var id = '#' + this.id;
+      $.each(SA_FIELDS, function (key, pair) { if (pair[0] === id) { saResetField(key); } });
+    });
 
     /* ---------- Walk-in customer (sale) ---------- */
     var WALKIN = <?= json_encode(BF_WALKIN_NAME, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -10336,6 +12472,8 @@ $n         = dt_n();
     function saShowServerError(field, message) {
       if (field && SA_FIELDS[field]) { saMark(field, message); return; }
       var m = /^lines:(\d+):(livestock|quantity|priceeach)$/.exec(field || '');
+      var mi = /^lines:(\d+):inventory$/.exec(field || '');
+      if (mi && saMarkLine(parseInt(mi[1], 10), 'inventory', message)) { return; }
       if (m && saMarkLine(parseInt(m[1], 10), m[2], message)) { return; }
       if (field === 'lines' || m) { saMarkLinesError(message); }
     }
@@ -10351,6 +12489,8 @@ $n         = dt_n();
       return '<tr class="line-row" data-seq="' + seq + '">' +
         '<td><select class="form-control sl-livestock" aria-describedby="slHelp' + seq + ' slFb' + seq + '"></select>' +
           '<div class="helper-line line-help" id="slHelp' + seq + '" aria-live="polite"></div>' +
+          '<div class="mt-1"><select class="form-control sl-inv" aria-label="Inventory account (credit)"></select>' +
+          '<div class="invalid-feedback" data-default="Select the inventory (credit) account.">Select the inventory (credit) account.</div></div>' +
           '<div class="invalid-feedback" id="slFb' + seq + '" data-default="Select a livestock item.">Select a livestock item.</div></td>' +
         '<td class="w-qty"><input type="number" class="form-control sl-qty" min="1" max="999999" step="1" inputmode="numeric" aria-describedby="slQtyFb' + seq + '">' +
           '<div class="invalid-feedback" id="slQtyFb' + seq + '" data-default="Quantity must be a whole number greater than 0.">Quantity must be a whole number greater than 0.</div></td>' +
@@ -10374,7 +12514,7 @@ $n         = dt_n();
     }
 
     function saLineValues($tr) {
-      return { item: $tr.find('.sl-livestock').val() || '', qty: $.trim($tr.find('.sl-qty').val()), price: $.trim($tr.find('.sl-price').val()) };
+      return { item: $tr.find('.sl-livestock').val() || '', inv: $tr.find('.sl-inv').val() || '', qty: $.trim($tr.find('.sl-qty').val()), price: $.trim($tr.find('.sl-price').val()) };
     }
     function saQtyOk(v) { return RE_QTY.test(v.qty) && /[1-9]/.test(v.qty); }
     function saLineTotal(v) {
@@ -10442,7 +12582,14 @@ $n         = dt_n();
       $('#btnSaveSale').prop('disabled', saStockBlocked || saSaving);
     }
 
-    function saAddLine(livestockId, qty, price) {
+    function saInvDefault(id) { var a = SLIVE[String(id)]; return a && Number(a.invaccount) > 0 ? a.invaccount : JA.defaults.inventory; }
+    function saApplyDefaultInventory($tr) {
+      if ($tr.data('invtouched')) { return; }
+      jaSet($tr.find('.sl-inv'), 0, saInvDefault($tr.find('.sl-livestock').val()));
+    }
+    $('#saLinesBody').on('change', '.sl-inv', function () { $(this).closest('tr').data('invtouched', true); saResetLine($(this)); });
+
+    function saAddLine(livestockId, qty, price, inventory) {
       if ($('#saLinesBody tr.line-row').length >= CFG.maxLines) {
         toastr.warning('A sale can have at most ' + CFG.maxLines + ' lines.');
         return null;
@@ -10452,6 +12599,9 @@ $n         = dt_n();
       if (livestockId && SLIVE[String(livestockId)]) { $tr.find('.sl-livestock').val(String(livestockId)); }
       if (qty !== undefined) { $tr.find('.sl-qty').val(qty); }
       if (price !== undefined) { $tr.find('.sl-price').val(price); $tr.data('touched', true); } else { saApplyDefaultPrice($tr); }
+      $tr.find('.sl-inv').html(jaOpts('assets', 'Select inventory account'));
+      jaSet($tr.find('.sl-inv'), inventory, saInvDefault(livestockId));
+      if (Number(inventory) > 0) { $tr.data('invtouched', true); }
       if (saLocked) { $tr.find('input, select, button').prop('disabled', true); }
       saRenumber();
       saUpdateLine($tr);
@@ -10470,6 +12620,7 @@ $n         = dt_n();
       saResetLine($tr.find('.sl-qty'));
       saApplyDefaultPrice($tr);
       saResetLine($tr.find('.sl-price'));
+      saApplyDefaultInventory($tr);
       saUpdateLine($tr);
       saRecalc();
     });
@@ -10513,6 +12664,10 @@ $n         = dt_n();
       saLocked = false;
       $('#saCustomer, #saDate, #saRef, #saPaid, #saAccount, #saNote, #btnAddSaleLine').prop('disabled', false);
       $('#saLockMsg').prop('hidden', true).text('');
+      jaTake(SL);
+      jaFill('#saRevenue', 'revenue', 'Select account', 0, JA.defaults.revenue);
+      jaFill('#saReceivable', 'assets', 'Select account', 0, JA.defaults.receivable);
+      jaFill('#saCogs', 'expense', 'Select account', 0, JA.defaults.cogs);
       saToggleWalkin();
       $('#saLinesBody').empty();
     }
@@ -10561,7 +12716,10 @@ $n         = dt_n();
         $('#saNote').val(wk.is ? wk.note : inv.note);
         $('#saPaid').val(inv.paid);
         $('#saAccount').val(SL.receivedinaccountid > 0 && SACC[String(SL.receivedinaccountid)] ? String(SL.receivedinaccountid) : '');
-        $.each(SL.lines, function (i, l) { saAddLine(l.livestockid, l.quantity, l.priceeach); });
+        jaSet('#saRevenue', SL.revenueaccountid, JA.defaults.revenue);
+        jaSet('#saReceivable', SL.receivableaccountid, JA.defaults.receivable);
+        jaSet('#saCogs', SL.cogsaccountid, JA.defaults.cogs);
+        $.each(SL.lines, function (i, l) { saAddLine(l.livestockid, l.quantity, l.priceeach, l.inventoryaccountid); });
 
         var msgs = [];
         if (saLocked) {
@@ -10622,6 +12780,7 @@ $n         = dt_n();
       });
       if (!ok) { return false; }
       if (total > MAX_TOTAL) { saMarkLinesError('The sale total is too large.'); return false; }
+      if (total > 0n && !$('#saRevenue').val()) { saMark('revenueaccountid', null); return false; }
 
       var errs = saStockErrors();
       for (var k = 0; k < errs.length; k++) {
@@ -10633,6 +12792,7 @@ $n         = dt_n();
       var paid = toMinor(paidRaw, 2);
       if (paid > total) { saMark('paidamount', 'Paid amount cannot be more than the total.'); return false; }
       if (saIsWalkin() && paid !== total) { saMark('paidamount', 'A walk-in sale must be paid in full.'); return false; }
+      if (paid < total && !$('#saReceivable').val()) { saMark('receivableaccountid', null); return false; }
       if (saEditId && SL.invoice && paid < toMinorSigned(SL.invoice.refunded)) {
         saMark('paidamount', 'Paid amount cannot be less than the refunds already made (' + moneyS(SL.invoice.refunded) + ').');
         return false;
@@ -10663,6 +12823,10 @@ $n         = dt_n();
         note: $.trim($('#saNote').val()),
         lines: JSON.stringify(lines)
       };
+      data.revenueaccountid    = $('#saRevenue').val() || 0;
+      data.receivableaccountid = $('#saReceivable').val() || 0;
+      data.cogsaccountid       = $('#saCogs').val() || 0;
+      data.inventoryaccounts   = JSON.stringify($('#saLinesBody tr.line-row').map(function () { return Number($(this).find('.sl-inv').val() || 0); }).get());
       if (saEditId) { data.invoiceid = saEditId; }
 
       var ok = false;
@@ -12531,7 +14695,523 @@ $n         = dt_n();
     });
 </script>
 
-<!-- ===================== Purchase quick add: supplier, livestock (with its own type and status) ===================== -->
+<!-- ===================== Purchase with many lines (Add line) + quick add: supplier, livestock ===================== -->
+<script nonce="<?= $n ?>">
+    /* ---------- Header fields (lines have their own keys) ---------- */
+    var PU_FIELDS = {
+      supplierid:        ['#puSupplier', '#puSupplierFb'],
+      purchasedate:      ['#puDate',     '#puDateFb'],
+      reference:         ['#puRef',      '#puRefFb'],
+      paidamount:        ['#puPaid',     '#puPaidFb'],
+      paidfromaccountid: ['#puAccount',  '#puAccountFb'],
+      note:              ['#puNote',     '#puNoteFb']
+    };
+    var PU_DEFAULTS = {};
+    $.each(PU_FIELDS, function (key, pair) { PU_DEFAULTS[key] = $(pair[1]).text(); });
+    var PU_LINE_KEYS = { livestock: '.pl-livestock', quantity: '.pl-qty', purchasecost: '.pl-cost', priceeach: '.pl-price', debit: '.pl-debit' };
+    PU_FIELDS.payableaccountid   = ['#puPayable', '#puPayableFb'];
+    PU_DEFAULTS.payableaccountid = $('#puPayableFb').text();
+
+    var puSeq = 0, puCalcSeq = 0, puCalcTimer = null, puCalcOk = false, puCalcMsg = '', puCalcFlag = null;
+
+    /* ---------- Invalid state ---------- */
+    function puResetLine($c) {
+      $c.removeClass('is-invalid');
+      $c.siblings('.invalid-feedback').each(function () { $(this).text($(this).attr('data-default') || ''); });
+    }
+    function puClearInvalid() {
+      $.each(PU_FIELDS, function (key) { puResetField(key); });
+      $('#puLinesBody .form-control').each(function () { puResetLine($(this)); });
+      $('#puLinesFb').prop('hidden', true);
+      puBalanceFlagged = false;
+    }
+    function puClearCalcFlag() {
+      if (!puCalcFlag) { return; }
+      if (puCalcFlag.line) { puResetLine(puCalcFlag.line); } else { puResetField(puCalcFlag.key); }
+      puCalcFlag = null;
+    }
+    function puMarkLine(n, key, message) {
+      var $c = $('#puLinesBody tr.line-row').eq(n - 1).find(PU_LINE_KEYS[key]);
+      if (!$c.length) { return false; }
+      if (message) { $c.siblings('.invalid-feedback').text(message); }
+      $c.addClass('is-invalid').trigger('focus');
+      return true;
+    }
+    function puMarkLinesError(message) { $('#puLinesFb').text(message).prop('hidden', false); }
+
+    /* Server field key: a header field, "lines", or "lines:N:livestock|quantity|purchasecost|priceeach". */
+    function puShowServerError(field, message) {
+      if (field && PU_FIELDS[field]) { puMark(field, message); return; }
+      var m = /^lines:(\d+):(livestock|quantity|purchasecost|priceeach|debit)$/.exec(field || '');
+      if (m && puMarkLine(parseInt(m[1], 10), m[2], message)) { return; }
+      if (field === 'lines' || m) { puMarkLinesError(message); }
+    }
+
+    /* ---------- Lines ---------- */
+    function puItemOptions() {
+      var h = '<option value="">Select livestock</option>';
+      $.each(PL.livestock || [], function (i, r) { h += '<option value="' + Number(r.livestockid) + '">' + esc(r.name + ' (' + r.type + ')') + '</option>'; });
+      return h;
+    }
+
+    function puLineHtml(seq) {
+      return '<tr class="line-row" data-seq="' + seq + '">' +
+        '<td><select class="form-control pl-livestock" aria-describedby="plHelp' + seq + ' plFb' + seq + '"></select>' +
+          '<div class="helper-line line-help" id="plHelp' + seq + '" aria-live="polite"></div>' +
+          '<div class="mt-1"><select class="form-control pl-debit" aria-label="Inventory account (debit)"></select>' +
+          '<div class="invalid-feedback" data-default="Select the inventory (debit) account.">Select the inventory (debit) account.</div></div>' +
+          '<div class="invalid-feedback" id="plFb' + seq + '" data-default="Select a livestock item.">Select a livestock item.</div></td>' +
+        '<td class="w-qty"><input type="number" class="form-control pl-qty" min="1" max="999999" step="1" inputmode="numeric" aria-describedby="plQtyFb' + seq + '">' +
+          '<div class="invalid-feedback" id="plQtyFb' + seq + '" data-default="Quantity must be a whole number greater than 0.">Quantity must be a whole number greater than 0.</div></td>' +
+        '<td class="w-price"><input type="number" class="form-control pl-cost" min="0" max="999999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="plCostFb' + seq + '">' +
+          '<div class="invalid-feedback" id="plCostFb' + seq + '" data-default="Purchase cost must be 0 or more, with up to 2 decimals.">Purchase cost must be 0 or more, with up to 2 decimals.</div></td>' +
+        '<td class="w-price"><input type="text" class="form-control pl-costeach" value="" readonly aria-readonly="true"></td>' +
+        '<td class="w-price"><input type="number" class="form-control pl-price" min="0" max="9999999.99" step="0.01" inputmode="decimal" value="0" aria-describedby="plPriceFb' + seq + '">' +
+          '<div class="invalid-feedback" id="plPriceFb' + seq + '" data-default="Price Each must be 0 or more, with up to 2 decimals.">Price Each must be 0 or more, with up to 2 decimals.</div></td>' +
+        '<td class="w-rm text-center"><button type="button" class="btn btn-danger act-btn btn-pl-remove" title="Remove line"><i class="fas fa-times" aria-hidden="true"></i></button></td>' +
+        '</tr>';
+    }
+
+    function puRenumber() {
+      var $rows = $('#puLinesBody tr.line-row');
+      $rows.each(function (i) {
+        var n = i + 1, $tr = $(this);
+        $tr.find('.pl-livestock').attr('aria-label', 'Livestock, line ' + n);
+        $tr.find('.pl-qty').attr('aria-label', 'Quantity, line ' + n);
+        $tr.find('.pl-cost').attr('aria-label', 'Purchase cost, line ' + n);
+        $tr.find('.pl-costeach').attr('aria-label', 'Cost each, line ' + n);
+        $tr.find('.pl-price').attr('aria-label', 'Price Each, line ' + n);
+        $tr.find('.btn-pl-remove').attr('aria-label', 'Remove line ' + n).prop('disabled', $rows.length === 1);
+      });
+    }
+
+    function puLineValues($tr) {
+      return {
+        item:  $tr.find('.pl-livestock').val() || '',
+        debit: $tr.find('.pl-debit').val() || '',
+        qty:   $.trim($tr.find('.pl-qty').val()),
+        cost:  $.trim($tr.find('.pl-cost').val()),
+        price: $.trim($tr.find('.pl-price').val())
+      };
+    }
+    function puQtyOk(v) { return RE_QTY.test(v.qty) && /[1-9]/.test(v.qty); }
+
+    // Price Each follows the Price Each of the animal until the user types a price on that line
+    function puApplyDefaultPrice($tr) {
+      if ($tr.data('touched')) { return; }
+      var a = PLIVE[String($tr.find('.pl-livestock').val() || '')];
+      $tr.find('.pl-price').val(a ? a.priceeach : '0');
+    }
+
+    function puDebitDefault(id) { var a = PLIVE[String(id)]; return a && Number(a.invaccount) > 0 ? a.invaccount : JA.defaults.inventory; }
+    function puApplyDefaultDebit($tr) {
+      if ($tr.data('debittouched')) { return; }
+      jaSet($tr.find('.pl-debit'), 0, puDebitDefault($tr.find('.pl-livestock').val()));
+    }
+    $('#puLinesBody').on('change', '.pl-debit', function () { $(this).closest('tr').data('debittouched', true); puResetLine($(this)); });
+
+    function puAddLine(livestockId, qty, cost, price, debit) {
+      if ($('#puLinesBody tr.line-row').length >= CFG.maxLines) {
+        toastr.warning('A purchase can have at most ' + CFG.maxLines + ' lines.');
+        return null;
+      }
+      var $tr = $(puLineHtml(++puSeq)).appendTo('#puLinesBody');
+      $tr.find('.pl-livestock').html(puItemOptions());
+      if (livestockId && PLIVE[String(livestockId)]) { $tr.find('.pl-livestock').val(String(livestockId)); }
+      if (qty !== undefined) { $tr.find('.pl-qty').val(qty); }
+      if (cost !== undefined) { $tr.find('.pl-cost').val(cost); }
+      if (price !== undefined) { $tr.find('.pl-price').val(price); $tr.data('touched', true); } else { puApplyDefaultPrice($tr); }
+      $tr.find('.pl-debit').html(jaOpts('assets', 'Select inventory account'));
+      jaSet($tr.find('.pl-debit'), debit, puDebitDefault(livestockId));
+      if (Number(debit) > 0) { $tr.data('debittouched', true); }
+      puRenumber();
+      puRecalc();
+      return $tr;
+    }
+
+    /* ---------- Live recalculation: Cost Each, Purchase Cost and Balance due come ONLY from the server ---------- */
+    function puCalcRequest(idx, payload, complete, paidRaw) {
+      var seq = ++puCalcSeq;
+      $.ajax({
+        url: URL_SELF, type: 'POST', dataType: 'json',
+        data: { action: 'purchasecalc', csrf_token: CSRF, lines: JSON.stringify(payload), complete: complete ? 1 : 0, paidamount: paidRaw }
+      }).done(function (res) {
+        if (seq !== puCalcSeq) { return; }
+        puClearCalcFlag();
+        var $rows = $('#puLinesBody tr.line-row');
+        if (res.success) {
+          puCalcOk = complete; puCalcMsg = '';
+          $.each(idx, function (j, r) { $rows.eq(r).find('.pl-costeach').val(moneyS(res.data.lines[j])); });
+          if (complete) {
+            $('#puFootPurchaseCost').text(moneyS(res.data.purchasecost));
+            $('#puFootPaid').text(moneyS(res.data.paid));
+            $('#puFootBalance').text(moneyS(res.data.balance));
+          } else {
+            $('#puFootPurchaseCost, #puFootPaid, #puFootBalance').text('-');
+          }
+        } else {
+          puCalcOk = false; puCalcMsg = res.message || '';
+          var m = /^lines:(\d+):(quantity|purchasecost)$/.exec(res.field || '');
+          if (m && idx[parseInt(m[1], 10) - 1] !== undefined) {
+            var $c = $rows.eq(idx[parseInt(m[1], 10) - 1]).find(PU_LINE_KEYS[m[2]]);
+            $c.addClass('is-invalid').siblings('.invalid-feedback').text(res.message);
+            puCalcFlag = { line: $c };
+          } else if (res.field && PU_FIELDS[res.field]) {
+            $(PU_FIELDS[res.field][0]).addClass('is-invalid');
+            $(PU_FIELDS[res.field][1]).text(res.message);
+            puCalcFlag = { key: res.field };
+          }
+        }
+        puSaveState();
+      }).fail(function () {
+        if (seq !== puCalcSeq) { return; }
+        puCalcOk = false; puCalcMsg = 'Cost each could not be calculated. Please try again.';
+        puSaveState();
+      });
+    }
+
+    function puRecalc() {
+      var paidRaw = $.trim($('#puPaid').val()) || '0';
+      var $rows = $('#puLinesBody tr.line-row'), sums = {}, idx = [], payload = [], complete = true;
+
+      $rows.each(function (i) {
+        var v = puLineValues($(this)), qOk = puQtyOk(v);
+        if (v.item && qOk) { sums[v.item] = (sums[v.item] || 0) + Number(v.qty); }
+        if (qOk && RE_PAID.test(v.cost)) { idx.push(i); payload.push({ quantity: v.qty, purchasecost: v.cost }); } else { complete = false; }
+      });
+      $rows.each(function () {
+        var v = puLineValues($(this)), a = PLIVE[String(v.item)], t = '';
+        if (a) {
+          t = 'On hand: ' + fmtInt(a.currentstock) + ' animals';
+          if (puQtyOk(v)) { t += '. Stock after purchase: ' + fmtInt(a.currentstock + sums[v.item]) + ' animals'; }
+        }
+        $(this).find('.line-help').text(t);
+      });
+
+      var avail = puAvailableMinor();
+      $('#puAccountHelp').text(avail === null ? '' : 'Available balance: ' + minorMoney(avail));
+      var paidTyped = RE_PAID.test(paidRaw) && /[1-9]/.test(paidRaw);
+      $('#puAccountReq').prop('hidden', !paidTyped);
+      $('#puAccount').attr('aria-required', paidTyped ? 'true' : 'false');
+
+      var msg = RE_PAID.test(paidRaw) ? puBalanceMessage(toMinor(paidRaw, 2)) : '';
+      puBalanceBlocked = msg !== '';
+      if (msg) {
+        $('#puPaid').addClass('is-invalid');
+        $('#puPaidFb').text(msg);
+      } else if (puBalanceFlagged) {
+        $('#puPaid').removeClass('is-invalid');
+        $('#puPaidFb').text(PU_DEFAULTS.paidamount);
+      }
+      puBalanceFlagged = puBalanceBlocked;
+
+      puCalcOk = false;
+      $('#puLinesBody .pl-costeach').val('');
+      clearTimeout(puCalcTimer);
+      puCalcSeq++;
+      if (!payload.length) {
+        $('#puFootPurchaseCost, #puFootPaid, #puFootBalance').text('-');
+        puSaveState();
+        return;
+      }
+      puSaveState();
+      puCalcTimer = setTimeout(function () { puCalcRequest(idx, payload, complete, paidRaw); }, 250);
+    }
+
+    /* ---------- Line events ---------- */
+    $('#btnAddPurchaseLine').on('click', function () {
+      $('#puLinesFb').prop('hidden', true);
+      var $tr = puAddLine(0);
+      if ($tr) { $tr.find('.pl-livestock').trigger('focus'); }
+    });
+    $('#puLinesBody').on('change', '.pl-livestock', function () {
+      var $tr = $(this).closest('tr');
+      puResetLine($(this));
+      puResetLine($tr.find('.pl-qty'));
+      puApplyDefaultPrice($tr);
+      puResetLine($tr.find('.pl-price'));
+      puApplyDefaultDebit($tr);
+      $('#puLinesFb').prop('hidden', true);
+      puRecalc();
+    });
+    $('#puLinesBody').on('input', '.pl-price', function () { $(this).closest('tr').data('touched', true); });
+    $('#puLinesBody').on('input', '.pl-qty, .pl-cost, .pl-price', function () {
+      puResetLine($(this));
+      $('#puLinesFb').prop('hidden', true);
+      puRecalc();
+    });
+    $('#puLinesBody').on('click', '.btn-pl-remove', function () {
+      $(this).closest('tr').remove();
+      if (!$('#puLinesBody tr.line-row').length) { puAddLine(0); }
+      puRenumber();
+      puRecalc();
+    });
+
+    /* ---------- Selects (the line selects keep their value) ---------- */
+    function puFillSelects() {
+      var s = '<option value="">Select supplier</option><option value="none">None (no supplier)</option>';
+      $.each(PL.suppliers || [], function (i, r) { s += '<option value="' + Number(r.supplierid) + '">' + esc(r.name) + '</option>'; });
+      $('#puSupplier').html(s);
+
+      var a = '<option value="">Select account</option>';
+      $.each(PL.accounts || [], function (i, r) { a += '<option value="' + Number(r.accountid) + '">' + esc(r.code + ' ' + r.accountname) + '</option>'; });
+      $('#puAccount').html(a);
+
+      indexPurchaseLookups();
+      jaTake(PL);
+      jaFill('#puPayable', 'liability', 'Select account', $('#puPayable').val(), JA.defaults.payable);
+      $('#puLinesBody .pl-debit').each(function () { var cur = $(this).val(); $(this).html(jaOpts('assets', 'Select inventory account')); jaSet($(this), cur, ''); });
+      $('#puLinesBody .pl-livestock').each(function () {
+        var cur = $(this).val();
+        $(this).html(puItemOptions());
+        $(this).val(cur == null ? '' : cur);
+      });
+    }
+
+    function puRebuildKeep() {
+      var keep = { s: $('#puSupplier').val(), a: $('#puAccount').val() };
+      puFillSelects();
+      $('#puSupplier').val(keep.s == null ? '' : keep.s);
+      $('#puAccount').val(keep.a == null ? '' : keep.a);
+    }
+
+    /* ---------- Open: new purchase ---------- */
+    function showPurchaseModal(livestockId) {
+      puEditId = 0; puBack = ''; puManual = false;
+      $('#purchaseForm')[0].reset();
+      puClearInvalid();
+      $('#puLinesBody').empty();
+      puFillSelects();
+      puSaving = false; puCalcOk = false;
+      $('#purchaseModalTitle').text('Purchase Livestock');
+      $('#puPaid, #puAccount').prop('disabled', false);
+      $('#puDate').val(ymd(new Date()));
+      $('#puPaid').val('0');
+      puAddLine(livestockId);
+      puSupplierHelp();
+      puRecalc();
+      $('#purchaseModal').modal('show');
+    }
+
+    /* ---------- Open: edit purchase ---------- */
+    function openPurchaseEdit(id, back) {
+      if (puOpening) { return; }
+      puOpening = true;
+      api({ action: 'purchaseeditlookups', purchaseid: id }).done(function (res) {
+        if (!res.success) { if (res.blocked) { toastr.warning(res.message); } else { toastr.error(res.message); } return; }
+        var d = res.data, p = d.purchase;
+        PL = { suppliers: d.suppliers, livestock: d.livestock, accounts: d.accounts };
+        puEditId = id; puBack = back || ''; puManual = !!d.manual; puSaving = false;
+        $('#purchaseForm')[0].reset();
+        puClearInvalid();
+        $('#puLinesBody').empty();
+        puFillSelects();
+        $('#purchaseModalTitle').text('Edit Purchase #' + p.purchaseid);
+        $('#puSupplier').val(p.nosupplier ? 'none' : String(p.supplierid));
+        $('#puDate').val(p.purchasedate);
+        $('#puRef').val(p.reference);
+        $('#puNote').val(p.note);
+        JA = d.jaccounts || JA;
+        jaFill('#puPayable', 'liability', 'Select account', d.payableaccountid, JA.defaults.payable);
+        $.each(d.lines, function (i, l) { puAddLine(l.livestockid, l.quantity, l.purchasecost, l.priceeach, l.debitaccountid); });
+        $('#puPaid').val(p.paid);
+        $('#puAccount').val(p.accountid > 0 && PACC[String(p.accountid)] ? String(p.accountid) : '');
+        $('#puPaid, #puAccount').prop('disabled', puManual);
+        puSupplierHelp();
+        puRecalc();
+        if (puManual) { toastr.info('The paid amount and account cannot change here: this purchase has payments entered on the Payments page.'); }
+        gotoModal('#purchaseModal');
+      }).always(function () { puOpening = false; });
+    }
+
+    /* ---------- Client validation (the server repeats every rule) ---------- */
+    function puValidate() {
+      puClearInvalid();
+
+      var sup = String($('#puSupplier').val() || '');
+      if (!sup) { puMark('supplierid', null); return false; }
+
+      var date = $.trim($('#puDate').val());
+      if (!realDate(date)) { puMark('purchasedate', null); return false; }
+
+      var $rows = $('#puLinesBody tr.line-row');
+      if (!$rows.length) { puMarkLinesError('Add at least one line.'); return false; }
+      if ($rows.length > CFG.maxLines) { puMarkLinesError('A purchase can have at most ' + CFG.maxLines + ' lines.'); return false; }
+
+      var total = 0n, ok = true, sums = {};
+      $rows.each(function (i) {
+        var n = i + 1, v = puLineValues($(this));
+        if (!v.item || !PLIVE[String(v.item)]) { puMarkLine(n, 'livestock', null); ok = false; return false; }
+        if (!v.debit) { puMarkLine(n, 'debit', null); ok = false; return false; }
+        if (!puQtyOk(v)) { puMarkLine(n, 'quantity', 'Quantity must be a whole number greater than 0.'); ok = false; return false; }
+        sums[v.item] = (sums[v.item] || 0) + Number(v.qty);
+        var a = PLIVE[String(v.item)];
+        if (a.currentstock + sums[v.item] > CFG.maxStock) {
+          puMarkLine(n, 'quantity', 'Cannot purchase: ' + a.name + ' stock would exceed ' + fmtInt(CFG.maxStock) + '.');
+          ok = false; return false;
+        }
+        if (!RE_PAID.test(v.cost)) { puMarkLine(n, 'purchasecost', null); ok = false; return false; }
+        if (!RE_PRICE.test(v.price)) { puMarkLine(n, 'priceeach', null); ok = false; return false; }
+        total += toMinor(v.cost, 2);
+      });
+      if (!ok) { return false; }
+      if (total > MAX_TOTAL) { puMarkLinesError('The purchase total is too large.'); return false; }
+      if (!puCalcOk) { puMarkLinesError(puCalcMsg || 'Cost Each is still being calculated. Please wait.'); return false; }
+
+      var paidRaw = $.trim($('#puPaid').val()) || '0';
+      if (!RE_PAID.test(paidRaw)) { puMark('paidamount', null); return false; }
+      var paid = toMinor(paidRaw, 2);
+      if (paid > total) { puMark('paidamount', 'Paid amount cannot be more than the purchase cost.'); return false; }
+      if (paid < total && !$('#puPayable').val()) { puMark('payableaccountid', null); return false; }
+      if (sup === 'none' && paid !== total) { puMark('paidamount', 'A purchase without a supplier must be paid in full.'); return false; }
+      if (paid > 0n && !$('#puAccount').val()) { puMark('paidfromaccountid', null); return false; }
+      var balMsg = puBalanceMessage(paid);
+      if (balMsg) { puBalanceFlagged = true; puMark('paidamount', balMsg); return false; }
+      return true;
+    }
+
+    /* ---------- Save (new) or update (edit): afterwards the purchase view opens ---------- */
+    $('#purchaseForm').off('submit').on('submit', function (e) {
+      e.preventDefault();
+      if (puSaving || !puValidate()) { return; }
+
+      var lines = [];
+      $('#puLinesBody tr.line-row').each(function () {
+        var v = puLineValues($(this));
+        lines.push({ livestockid: v.item, quantity: v.qty, purchasecost: v.cost, priceeach: v.price, debitaccountid: v.debit });
+      });
+
+      var data = {
+        action: puEditId ? 'purchaseupdate' : 'purchasesave',
+        supplierid: $('#puSupplier').val(),
+        purchasedate: $.trim($('#puDate').val()),
+        reference: $.trim($('#puRef').val()),
+        paidamount: $.trim($('#puPaid').val()) || '0',
+        paidfromaccountid: $('#puAccount').val() || 0,
+        payableaccountid: $('#puPayable').val() || 0,
+        note: $.trim($('#puNote').val()),
+        lines: JSON.stringify(lines)
+      };
+      if (puEditId) { data.purchaseid = puEditId; }
+
+      var ok = false;
+      puSaving = true;
+      $('#btnSavePurchase').prop('disabled', true);
+      api(data).done(function (res) {
+        if (res.success) {
+          ok = true;
+          toastr.success(res.message);
+          var back = puBack;
+          puBack = '';
+          afterChange();
+          openPurchaseView(res.purchaseid, back === '#purchaseViewModal' ? PVBACK : back);
+          return;
+        }
+        if (res.field === 'paidamount' && /^Insufficient/.test(res.message || '')) { puBalanceFlagged = true; }
+        puShowServerError(res.field, res.message);
+        toastr.error(res.message);
+        if (res.field === 'paidamount' || /^lines/.test(res.field || '')) { puRefreshLookups(); }
+      }).always(function () {
+        puSaving = false;
+        if (ok) { $('#btnSavePurchase').prop('disabled', true); } else { puRecalc(); }
+      });
+    });
+
+    /* ---------- Quick add (same as before): supplier, type, stage, livestock ---------- */
+    $('#purchaseModal').on('show.bs.modal', function () {
+      qpResetModal('#purchaseModal');
+      lslLoad();
+    });
+
+    var QSP = {
+      btn: '#btnQspAdd', panel: '#qspPanel', save: '#btnQspSave', cancel: '#btnQspCancel', ok: '#qspOk', focus: '#qspName', action: 'suppliersave',
+      fields: [
+        { key: 'name', sel: '#qspName', fb: '#qspNameFb', req: 'Supplier name is required.', max: 150, maxMsg: 'Supplier name is too long (maximum 150 characters).', reserved: NONE_NAME },
+        { key: 'contact', sel: '#qspContact', fb: '#qspContactFb', max: 50, maxMsg: 'Contact is too long (maximum 50 characters).' },
+        { key: 'address', sel: '#qspAddress', fb: '#qspAddressFb', max: 255, maxMsg: 'Address is too long (maximum 255 characters).' }
+      ],
+      done: function (row, res) {
+        PL.suppliers = (PL.suppliers || []).concat([{ supplierid: row.supplierid, name: row.name }]).sort(byName);
+        puRebuildKeep();
+        $('#puSupplier').val(String(row.supplierid)).trigger('change');
+        $('#qspOk').text('Supplier "' + row.name + '" added and selected.');
+        toastr.success(res.message);
+        qpClose(QSP);
+      }
+    };
+    quickWire(QSP);
+
+    var QPT = {
+      btn: '#btnQptAdd', panel: '#qptPanel', save: '#btnQptSave', cancel: '#btnQptCancel', ok: '#qptOk', focus: '#qptName', action: 'typesave',
+      fields: [{ key: 'name', sel: '#qptName', fb: '#qptNameFb', req: 'Type name is required.', max: 100, maxMsg: 'Type name is too long (maximum 100 characters).' }],
+      done: function (row, res) {
+        LSL.types.push(row);
+        LSL.types.sort(byName);
+        lslFill('#qlvType', LSL.types, 'Select type', row.name);
+        $('#qlvType').removeClass('is-invalid');
+        $('#qlvTypeFb').text('Select a valid type.');
+        $('#qptOk').text('Type "' + row.name + '" added and selected.');
+        toastr.success(res.message);
+        qpClose(QPT);
+        table.ajax.reload(null, false);
+      }
+    };
+    quickWire(QPT);
+
+    var Qpg = {
+      btn: '#btnQpgAdd', panel: '#QpgPanel', save: '#btnQpgSave', cancel: '#btnQpgCancel', ok: '#QpgOk', focus: '#QpgName', action: 'stagesave',
+      fields: [{ key: 'name', sel: '#QpgName', fb: '#QpgNameFb', req: 'Stage name is required.', max: 50, maxMsg: 'Stage name is too long (maximum 50 characters).' }],
+      done: function (row, res) {
+        LSL.stages.push(row);
+        LSL.stages.sort(byName);
+        lslFill('#qlvStage', LSL.stages, 'Select stage', row.name);
+        $('#qlvStage').removeClass('is-invalid');
+        $('#qlvStageFb').text('Select a valid stage.');
+        $('#QpgOk').text('Stage "' + row.name + '" added and selected.');
+        toastr.success(res.message);
+        qpClose(Qpg);
+        table.ajax.reload(null, false);
+      }
+    };
+    quickWire(Qpg);
+
+    // New livestock: it is selected in the first empty line (or in a new line when every line is filled)
+    var QLV = {
+      btn: '#btnQlvAdd', panel: '#qlvPanel', save: '#btnQlvSave', cancel: '#btnQlvCancel', ok: '#qlvOk', focus: '#qlvName', action: 'livestockquicksave',
+      lookups: true,
+      prepare: function () {
+        lslFill('#qlvType', LSL.types, 'Select type', '');
+        lslFill('#qlvStage', LSL.stages, 'Select stage', 'Active');
+      },
+      fields: [
+        { key: 'name', sel: '#qlvName', fb: '#qlvNameFb', req: 'Name is required.', max: 150, maxMsg: 'Name is too long (maximum 150 characters).' },
+        { key: 'type', sel: '#qlvType', fb: '#qlvTypeFb', req: 'Select a valid type.' },
+        { key: 'stage', sel: '#qlvStage', fb: '#qlvStageFb', req: 'Select a valid stage.', def: 'Active' }
+      ],
+      done: function (row, res) {
+        PL.livestock = (PL.livestock || []).concat([{ livestockid: row.livestockid, name: row.name, type: row.type, currentstock: 0, costeach: row.costeach, priceeach: row.priceeach }]).sort(byName);
+        puRebuildKeep();   // re-indexes PLIVE and refreshes every line select
+        var $empty = $('#puLinesBody .pl-livestock').filter(function () { return !$(this).val(); }).first();
+        if ($empty.length) {
+          var $tr = $empty.closest('tr');
+          $empty.val(String(row.livestockid));
+          puResetLine($empty);
+          puApplyDefaultPrice($tr);
+          puRecalc();
+        } else {
+          puAddLine(row.livestockid);
+        }
+        $('#qlvOk').text('Livestock "' + row.name + '" added and selected.');
+        toastr.success(res.message);
+        qpClose(QLV);
+        table.ajax.reload(null, false);
+      }
+    };
+    quickWire(QLV);
+</script>
+
+<!-- Old purchase quick add script: inert (type="text/plain"). Delete this block (up to its closing script tag) when you want. -->
+<script type="text/plain" nonce="<?= $n ?>">
 <script nonce="<?= $n ?>">
     // Rebuild the three selects of the purchase modal and keep what is selected (puFillSelects keeps the None option)
     function puRebuildKeep() {

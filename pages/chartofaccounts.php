@@ -46,7 +46,7 @@ const DT_LOGO_FILE = 'bushrofarmingandlivestocklogo.png'; // preferred logo file
 const DT_LOGO_DIRS = ['uploads', 'assets', 'images'];     // folders next to pages/ searched for the logo (in this order)
 
 /** Account types, in tab order. */
-const DT_ACC_TYPES = ['Assets', 'Liability', 'Expense', 'Equity', 'Revenue'];
+const DT_ACC_TYPES = ['Assets', 'Liability', 'Equity', 'Revenue', 'Expense'];
 
 /** Per type: [pane id, table id, main row label]. */
 const DT_TYPE_INFO = [
@@ -556,6 +556,32 @@ function dt_check_parent(PDO $pdo, int $accountId, int $parentId, string $type):
     if ($parent === null) {
         throw new DtFail('The selected parent group does not exist.');
     }
+    if ((string)$parent['accounttype'] !== $type) {
+        throw new DtFail('The parent group must have the same account type.');
+    }
+    /* Any level allowed; only block a parent that is one of the account's own descendants. */
+    $cursor = $parent['parentaccountid'];
+    for ($i = 0; $accountId > 0 && $cursor !== null && $i < 1000; $i++) {
+        if ((int)$cursor === $accountId) {
+            throw new DtFail('An account cannot be placed under one of its own sub-accounts.');
+        }
+        $row    = dt_q($pdo, 'SELECT parentaccountid FROM accounts WHERE accountid = :id', ['id' => (int)$cursor])->fetch();
+        $cursor = is_array($row) ? $row['parentaccountid'] : null;
+    }
+}
+
+function dt_check_parent_old(PDO $pdo, int $accountId, int $parentId, string $type): void
+{
+    if ($parentId <= 0) {
+        return;
+    }
+    if ($parentId === $accountId) {
+        throw new DtFail('An account cannot be its own parent.');
+    }
+    $parent = dt_lock_account($pdo, $parentId);
+    if ($parent === null) {
+        throw new DtFail('The selected parent group does not exist.');
+    }
     if ($parent['parentaccountid'] !== null) {
         throw new DtFail('The parent must be a top-level group.');
     }
@@ -665,6 +691,42 @@ function dt_act_parents(PDO $pdo): array
 
     $rows = dt_q(
         $pdo,
+        'SELECT accountid, parentaccountid, code, accountname FROM accounts WHERE accounttype = :t',
+        ['t' => $type]
+    )->fetchAll();
+    usort($rows, static fn (array $a, array $b): int => strnatcmp((string)$a['code'], (string)$b['code']));
+
+    $kids = [];
+    foreach ($rows as $r) {
+        $kids[$r['parentaccountid'] === null ? 0 : (int)$r['parentaccountid']][] = $r;
+    }
+
+    $out  = [];
+    $walk = static function (int $parentId, int $level) use (&$walk, &$kids, &$out, $exclude): void {
+        foreach ($kids[$parentId] ?? [] as $r) {
+            $id = (int)$r['accountid'];
+            if ($id === $exclude) {
+                continue; // skips the account itself and all its descendants
+            }
+            $out[] = ['accountid' => $id, 'code' => (string)$r['code'], 'accountname' => (string)$r['accountname'], 'level' => $level];
+            $walk($id, $level + 1);
+        }
+    };
+    $walk(0, 0);
+
+    return ['success' => true, 'data' => $out];
+}
+
+function dt_act_parents_old(PDO $pdo): array
+{
+    $type    = (string)($_POST['accounttype'] ?? '');
+    $exclude = max(0, (int)($_POST['excludeid'] ?? 0));
+    if (!dt_valid_type($type)) {
+        return ['success' => true, 'data' => []];
+    }
+
+    $rows = dt_q(
+        $pdo,
         'SELECT accountid, code, accountname FROM accounts
           WHERE parentaccountid IS NULL AND accounttype = :t AND accountid <> :x',
         ['t' => $type, 'x' => $exclude]
@@ -703,7 +765,7 @@ function dt_act_save(PDO $pdo): array
                     throw new DtFail('You cannot change the type of a group that has sub-accounts.', false, 'accounttype');
                 }
                 if ($d['parent'] > 0) {
-                    throw new DtFail('A group that has sub-accounts cannot be placed under another group.');
+                    /* allowed: any account can be moved under another; cycles are blocked in dt_check_parent() */
                 }
             }
         }
@@ -867,6 +929,88 @@ function dt_build_tree(PDO $pdo): array
  * @throws PDOException On a database error other than a missing table or column.
  */
 function dt_build_balances(PDO $pdo): array
+{
+    $balances = [];
+    foreach (DT_BALANCE_SOURCES as [$table, $column, $sign]) {
+        try {
+            $rows = dt_q(
+                $pdo,
+                "SELECT `{$column}` AS accountid, SUM(amount) AS total FROM `{$table}` WHERE `{$column}` IS NOT NULL GROUP BY `{$column}`"
+            )->fetchAll();
+        } catch (PDOException $e) {
+            if (in_array($e->getCode(), ['42S02', '42S22'], true)) {
+                dt_log_error('[accounts balances] skipped ' . $table . '.' . $column . ': ' . dt_describe_throwable($e));
+                continue;
+            }
+            throw $e;
+        }
+        foreach ($rows as $r) {
+            $id            = (int)$r['accountid'];
+            $balances[$id] = ($balances[$id] ?? 0.0) + $sign * (float)$r['total'];
+        }
+    }
+
+    /* Double entry: journal lines not already counted above (inventory, receivable, payable, revenue, COGS).
+       Assets and Expense grow with debit; Liability, Equity and Revenue grow with credit. */
+    $types = [];
+    foreach (dt_q($pdo, 'SELECT accountid, accounttype FROM accounts')->fetchAll() as $r) {
+        $types[(int)$r['accountid']] = (string)$r['accounttype'];
+    }
+    foreach (dt_build_journal($pdo) as $id => $j) {
+        $debitNormal   = in_array($types[$id] ?? 'Assets', ['Assets', 'Expense'], true);
+        $balances[$id] = ($balances[$id] ?? 0.0) + ($debitNormal ? $j['net'] : -$j['net']);
+    }
+
+    foreach ($balances as $id => $value) {
+        $balances[$id] = round($value, 2);
+    }
+
+    return $balances;
+}
+
+/**
+ * Journal totals per account (double entry written by pages/livestock.php).
+ * debit / credit = every journal line; net = (debit - credit) of the lines NOT already counted by
+ * receipts, payments or refunds (skipbalance = 0). A missing table or column is logged and counts as none.
+ *
+ * @param PDO $pdo Connection.
+ *
+ * @return array<int,array{debit:float,credit:float,net:float}> Totals per account id.
+ *
+ * @throws PDOException On a database error other than a missing table or column.
+ */
+function dt_build_journal(PDO $pdo): array
+{
+    try {
+        $rows = dt_q(
+            $pdo,
+            'SELECT accountid, SUM(debit) AS d, SUM(credit) AS c,
+                    SUM(CASE WHEN skipbalance = 0 THEN debit - credit ELSE 0 END) AS n
+               FROM journallines GROUP BY accountid'
+        )->fetchAll();
+    } catch (PDOException $e) {
+        if (in_array($e->getCode(), ['42S02', '42S22'], true)) {
+            dt_log_error('[accounts journal] skipped journallines: ' . dt_describe_throwable($e));
+
+            return [];
+        }
+        throw $e;
+    }
+
+    $out = [];
+    foreach ($rows as $r) {
+        $out[(int)$r['accountid']] = [
+            'debit'  => round((float)$r['d'], 2),
+            'credit' => round((float)$r['c'], 2),
+            'net'    => round((float)$r['n'], 2),
+        ];
+    }
+
+    return $out;
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_build_balances_old(PDO $pdo): array
 {
     $balances = [];
     foreach (DT_BALANCE_SOURCES as [$table, $column, $sign]) {
@@ -1340,7 +1484,192 @@ function dt_render_close(): void
  *
  * @return void
  */
-function dt_render_pane(string $type, array $branch, array $balances, bool $active): void
+function dt_node_totals(int $id, array $children, array $balances, array $journal, array &$memo): array
+{
+    if (isset($memo[$id])) {
+        return $memo[$id];
+    }
+    $t = [(float)($journal[$id]['debit'] ?? 0.0), (float)($journal[$id]['credit'] ?? 0.0), (float)($balances[$id] ?? 0.0)];
+    foreach ($children[$id] ?? [] as $c) {
+        $s     = dt_node_totals((int)$c['accountid'], $children, $balances, $journal, $memo);
+        $t[0] += $s[0];
+        $t[1] += $s[1];
+        $t[2] += $s[2];
+    }
+
+    return $memo[$id] = $t;
+}
+
+function dt_render_node(array $a, int $level, array $branch, array $balances, array $journal, array &$memo): void
+{
+    $id          = (int)$a['accountid'];
+    $children    = $branch['children'][$id] ?? [];
+    [$d, $c, $b] = dt_node_totals($id, $branch['children'], $balances, $journal, $memo);
+    $class       = 'acc-row' . (($level === 0 || $children) ? ' acc-sub' : '') . ($level > 0 ? ' child-row is-collapsed' : '');
+    ?>
+                        <tr class="<?= $class ?>"<?= dt_row_attrs($a) ?> data-level="<?= $level ?>">
+                          <td class="text-center"><?php if ($children): ?><button type="button" class="toggle-icon" aria-expanded="false" aria-label="Expand <?= dt_e((string)$a['accountname']) ?>">+</button><?php endif; ?></td>
+                          <td class="lvl-cell"><?= dt_e((string)$a['code']) ?></td>
+                          <td class="lvl-cell"><?= dt_e((string)$a['accountname']) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($d)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($c)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($b)) ?></td>
+                          <td class="text-center"><?= dt_action_buttons() ?></td>
+                        </tr>
+<?php
+    foreach ($children as $ch) {
+        dt_render_node($ch, $level + 1, $branch, $balances, $journal, $memo);
+    }
+}
+
+function dt_render_pane(string $type, array $branch, array $balances, array $journal, bool $active): void
+{
+    [$pane, $tableId, $mainLabel] = DT_TYPE_INFO[$type];
+    $memo    = [];
+    $gDebit  = 0.0;
+    $gCredit = 0.0;
+    $gBal    = 0.0;
+    foreach ($branch['groups'] as $g) {
+        [$sd, $sc, $sb] = dt_node_totals((int)$g['accountid'], $branch['children'], $balances, $journal, $memo);
+        $gDebit  += $sd;
+        $gCredit += $sc;
+        $gBal    += $sb;
+    }
+    ?>
+                  <div class="tab-pane fade<?= $active ? ' show active' : '' ?>" id="<?= dt_e($pane) ?>" role="tabpanel" aria-labelledby="tab-<?= dt_e($pane) ?>">
+<?php if ($branch['count'] === 0): ?>
+                    <p class="text-muted mb-0 py-3">No <?= dt_e($type) ?> accounts found.</p>
+<?php else: ?>
+                    <table id="<?= dt_e($tableId) ?>" class="table table-hover table-bordered acc-table" data-type="<?= dt_e($type) ?>">
+                      <thead>
+                        <tr>
+                          <th class="px36"></th>
+                          <th class="px110">Code</th>
+                          <th>Account Name</th>
+                          <th class="text-right px140">Debit</th>
+                          <th class="text-right px140">Credit</th>
+                          <th class="text-right px140"><?= $type === 'Assets' ? 'Running Balance' : 'Balance' ?></th>
+                          <th class="text-center px120">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr class="acc-main">
+                          <td></td>
+                          <td></td>
+                          <td><?= dt_e($mainLabel) ?></td>
+                          <td></td>
+                          <td></td>
+                          <td></td>
+                          <td></td>
+                        </tr>
+<?php foreach ($branch['groups'] as $g) { dt_render_node($g, 0, $branch, $balances, $journal, $memo); } ?>
+                      </tbody>
+                      <tfoot>
+                        <tr class="acc-main">
+                          <td></td>
+                          <td></td>
+                          <td><?= dt_e($mainLabel) ?> TOTAL</td>
+                          <td class="text-right"><?= dt_e(dt_money($gDebit)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($gCredit)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($gBal)) ?></td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+<?php endif; ?>
+                  </div>
+<?php
+}
+
+function dt_render_pane_v2_old(string $type, array $branch, array $balances, array $journal, bool $active): void
+{
+    [$pane, $tableId, $mainLabel] = DT_TYPE_INFO[$type];
+    $gDebit  = 0.0;
+    $gCredit = 0.0;
+    $gBal    = 0.0;
+    ?>
+                  <div class="tab-pane fade<?= $active ? ' show active' : '' ?>" id="<?= dt_e($pane) ?>" role="tabpanel" aria-labelledby="tab-<?= dt_e($pane) ?>">
+<?php if ($branch['count'] === 0): ?>
+                    <p class="text-muted mb-0 py-3">No <?= dt_e($type) ?> accounts found.</p>
+<?php else: ?>
+                    <table id="<?= dt_e($tableId) ?>" class="table table-hover table-bordered acc-table" data-type="<?= dt_e($type) ?>">
+                      <thead>
+                        <tr>
+                          <th class="px36"></th>
+                          <th class="px110">Code</th>
+                          <th>Account Name</th>
+                          <th class="text-right px140">Debit</th>
+                          <th class="text-right px140">Credit</th>
+                          <th class="text-right px140"><?= $type === 'Assets' ? 'Running Balance' : 'Balance' ?></th>
+                          <th class="text-center px120">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr class="acc-main">
+                          <td></td>
+                          <td><?= dt_e($branch['mainCode']) ?></td>
+                          <td><?= dt_e($mainLabel) ?></td>
+                          <td></td>
+                          <td></td>
+                          <td></td>
+                          <td></td>
+                        </tr>
+<?php foreach ($branch['groups'] as $g):
+    $gid      = (int)$g['accountid'];
+    $children = $branch['children'][$gid] ?? [];
+    $sd       = (float)($journal[$gid]['debit'] ?? 0.0);
+    $sc       = (float)($journal[$gid]['credit'] ?? 0.0);
+    $sb       = (float)($balances[$gid] ?? 0.0);
+    foreach ($children as $c) {
+        $cid = (int)$c['accountid'];
+        $sd += (float)($journal[$cid]['debit'] ?? 0.0);
+        $sc += (float)($journal[$cid]['credit'] ?? 0.0);
+        $sb += (float)($balances[$cid] ?? 0.0);
+    }
+    $gDebit  += $sd;
+    $gCredit += $sc;
+    $gBal    += $sb; ?>
+                        <tr class="acc-sub"<?= dt_row_attrs($g) ?>>
+                          <td class="text-center"><?php if ($children): ?><button type="button" class="toggle-icon" aria-expanded="false" aria-label="Expand <?= dt_e((string)$g['accountname']) ?>">+</button><?php endif; ?></td>
+                          <td><?= dt_e((string)$g['code']) ?></td>
+                          <td><?= dt_e((string)$g['accountname']) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($sd)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($sc)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($sb)) ?></td>
+                          <td class="text-center"><?= dt_action_buttons() ?></td>
+                        </tr>
+<?php foreach ($children as $c): $cid = (int)$c['accountid']; ?>
+                        <tr class="child-row is-collapsed"<?= dt_row_attrs($c) ?>>
+                          <td></td>
+                          <td class="child-cell"><?= dt_e((string)$c['code']) ?></td>
+                          <td class="child-cell"><?= dt_e((string)$c['accountname']) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($journal[$cid]['debit'] ?? 0.0)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($journal[$cid]['credit'] ?? 0.0)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($balances[$cid] ?? 0.0)) ?></td>
+                          <td class="text-center"><?= dt_action_buttons() ?></td>
+                        </tr>
+<?php endforeach; ?>
+<?php endforeach; ?>
+                      </tbody>
+                      <tfoot>
+                        <tr class="acc-main">
+                          <td></td>
+                          <td></td>
+                          <td><?= dt_e($mainLabel) ?> TOTAL</td>
+                          <td class="text-right"><?= dt_e(dt_money($gDebit)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($gCredit)) ?></td>
+                          <td class="text-right"><?= dt_e(dt_money($gBal)) ?></td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+<?php endif; ?>
+                  </div>
+<?php
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_render_pane_old(string $type, array $branch, array $balances, bool $active): void
 {
     [$pane, $tableId, $mainLabel] = DT_TYPE_INFO[$type];
     $isAssets = ($type === 'Assets');
@@ -1429,7 +1758,40 @@ function dt_render_pane(string $type, array $branch, array $balances, bool $acti
  *
  * @return void
  */
-function dt_view_list(array $tree, array $balances): void
+function dt_view_list(array $tree, array $balances, array $journal): void
+{
+    ?>
+        <div class="row">
+          <div class="col-12 mb-4">
+            <div class="card">
+              <div class="card-body">
+                <div class="card-head">
+                  <h2 class="header-title">Account List</h2>
+                  <button type="button" class="btn btn-primary btn-sm" id="btnAdd"><i class="fas fa-plus mr-1" aria-hidden="true"></i> Add Account</button>
+                </div>
+
+                <ul class="nav nav-tabs compact-tabs" id="accTabs" role="tablist">
+<?php foreach (DT_ACC_TYPES as $i => $type): $pane = DT_TYPE_INFO[$type][0]; ?>
+                  <li class="nav-item">
+                    <a class="nav-link<?= $i === 0 ? ' active' : '' ?>" id="tab-<?= dt_e($pane) ?>" data-toggle="tab" href="#<?= dt_e($pane) ?>" role="tab" aria-controls="<?= dt_e($pane) ?>" aria-selected="<?= $i === 0 ? 'true' : 'false' ?>"><?= dt_e($type) ?></a>
+                  </li>
+<?php endforeach; ?>
+                </ul>
+
+                <div class="tab-content">
+<?php foreach (DT_ACC_TYPES as $i => $type): ?>
+<?php dt_render_pane($type, $tree[$type], $balances, $journal, $i === 0); ?>
+<?php endforeach; ?>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+<?php
+}
+
+/** Old version, never called (delete it when you want). */
+function dt_view_list_old(array $tree, array $balances): void
 {
     ?>
         <div class="row">
@@ -1612,6 +1974,7 @@ try {
     $pdo      = dt_pdo();
     $tree     = dt_build_tree($pdo);
     $balances = dt_build_balances($pdo);
+    $journal  = dt_build_journal($pdo);
 } catch (Throwable $e) {
     dt_log_error('[accounts view] ' . dt_describe_throwable($e));
     $loadFail = true;
@@ -1696,7 +2059,7 @@ if ($loadFail) {
 }
 
 dt_render_open($page);
-dt_view_list($tree, $balances);
+dt_view_list($tree, $balances, $journal);
 dt_render_close();
 dt_modal_account();
 dt_modal_delete();
@@ -1881,12 +2244,56 @@ $n         = dt_n();
     $.each(openGroups, function (id, isOpen) {
       var gid = String(id).replace(/[^0-9]/g, '');
       if (!isOpen || gid === '') { return; }
-      setToggle($('tr.acc-sub[data-id="' + gid + '"] .toggle-icon'), true);
-      $('tr.child-row[data-parent="' + gid + '"]').removeClass('is-collapsed');
+      setToggle($('tr.acc-row[data-id="' + gid + '"] .toggle-icon'), true);
+      /* row visibility for all levels is applied just before DataTables starts (see the block below) */
+    });
+
+    /* ---------- Multi-level rows: parent map, visibility, indentation ---------- */
+    var PARENT_OF = {};
+    $('tr.acc-row').each(function () { PARENT_OF[$(this).attr('data-id')] = $(this).attr('data-parent') || ''; });
+
+    // A row is hidden when any ancestor is collapsed (any depth)
+    function dtHidden(id) {
+      var pid = PARENT_OF[id] || '', guard = 0;
+      while (pid !== '' && guard++ < 100) {
+        if (!openGroups[pid]) { return true; }
+        pid = PARENT_OF[pid] || '';
+      }
+      return false;
+    }
+
+    $('tr.acc-row').each(function () {
+      var $r = $(this);
+      $r.toggleClass('is-collapsed', dtHidden($r.attr('data-id')));
+      $r.find('td.lvl-cell').css('padding-left', (12 + (parseInt($r.attr('data-level'), 10) || 0) * 22) + 'px');
     });
 
     /* ---------- DataTables (one per account type) ---------- */
-    function exportButtons(label, cols, withBalance) {
+    function exportButtons(label, cols) {
+      var title = 'Chart of Accounts - ' + label;
+      var base  = { className: 'btn btn-secondary btn-sm', title: title, filename: title, footer: true, exportOptions: { columns: cols } };
+      return [
+        $.extend({}, base, { extend: 'copyHtml5',  text: '<i class="fas fa-copy"></i> Copy', title: '' }),
+        $.extend({}, base, { extend: 'csvHtml5',   text: '<i class="fas fa-file-csv"></i> CSV' }),
+        $.extend({}, base, { extend: 'excelHtml5', text: '<i class="fas fa-file-excel"></i> Excel' }),
+        $.extend({}, base, {
+          extend: 'pdfHtml5', text: '<i class="fas fa-file-pdf"></i> PDF',
+          orientation: 'portrait', pageSize: 'A4',
+          customize: function (doc) {
+            var tbl = null;
+            $.each(doc.content, function (_, c) { if (c.table) { tbl = c.table; } });
+            if (!tbl) { return; }
+            tbl.widths = [60, '*', 70, 70, 70];
+            $.each(tbl.body, function (_, row) {
+              $.each([2, 3, 4], function (__, k) { if (row[k]) { row[k].alignment = 'right'; } });
+            });
+          }
+        }),
+        $.extend({}, base, { extend: 'print',      text: '<i class="fas fa-print"></i> Print' })
+      ];
+    }
+
+    function exportButtons_old(label, cols, withBalance) {
       var title = 'Chart of Accounts - ' + label;
       var base  = { className: 'btn btn-secondary btn-sm', title: title, filename: title, footer: withBalance, exportOptions: { columns: cols } };
       return [
@@ -1914,7 +2321,7 @@ $n         = dt_n();
       var $t       = $(this);
       var label    = $t.attr('data-type');
       var isAssets = (label === 'Assets');
-      var lastCol  = isAssets ? 4 : 3;
+      var lastCol  = 6;
 
       var dt = $t.DataTable({
         paging: false,
@@ -1925,7 +2332,7 @@ $n         = dt_n();
         columnDefs: [{ targets: [0, lastCol], searchable: false }],
         dom: "<'dt-top'<'dt-len'><'dt-btns'B><'dt-find'f>>" +
              "<'table-scroll'tr>",
-        buttons: exportButtons(label, isAssets ? [1, 2, 3] : [1, 2], isAssets),
+        buttons: exportButtons(label, [1, 2, 3, 4, 5]),
         language: { search: 'Search:', searchPlaceholder: 'Search account...', zeroRecords: 'No accounts found' }
       });
 
@@ -1936,7 +2343,7 @@ $n         = dt_n();
     });
 
     /* ---------- Subgroup toggle (one delegated handler: the button or the whole row) ---------- */
-    $('.tab-content').on('click', '.acc-table tbody tr.acc-sub', function (e) {
+    $('.tab-content').on('click', '.acc-table tbody tr.acc-row', function (e) {
       if ($(e.target).closest('.act-btn').length) { return; }
 
       var $tr   = $(this);
@@ -1951,7 +2358,7 @@ $n         = dt_n();
 
       // rows().nodes() also returns rows currently filtered out by the search
       $tr.closest('table').DataTable().rows().nodes().to$()
-        .filter('.child-row[data-parent="' + id + '"]').toggleClass('is-collapsed', !open);
+        .filter('tr.acc-row').each(function () { $(this).toggleClass('is-collapsed', dtHidden($(this).attr('data-id'))); });
     });
 
     /* ---------- Tabs: remember the active one, fix widths of hidden tables ---------- */
@@ -1979,7 +2386,7 @@ $n         = dt_n();
       api({ action: 'parents', accounttype: type, excludeid: excludeId || 0 }).done(function (res) {
         if (req !== parentReq || !res.success) { return; }
         $.each(res.data, function (i, r) {
-          $p.append($('<option>').val(r.accountid).text(r.code + ' ' + r.accountname));
+          $p.append($('<option>').val(r.accountid).text(new Array((r.level || 0) * 4 + 1).join('\u00A0') + r.code + ' ' + r.accountname));
         });
         if (selected) { $p.val(String(selected)); }
         if ($p.val() === null) { $p.val(''); }
